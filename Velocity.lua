@@ -85,6 +85,298 @@ local playerEspMode = "With Outline"
 local playerEspFillColor = Color3.fromRGB(255, 255, 255)
 local playerEspOutlineColor = Color3.fromRGB(255, 255, 255)
 
+local PLATFORM_NAME = "Velocity_Fly_Platform"
+local oldPlat = workspace:FindFirstChild(PLATFORM_NAME)
+if oldPlat then 
+    pcall(function() oldPlat:Destroy() end) 
+end
+
+local isFlying = false
+local flySpeed = 65
+local platform = nil
+local heartbeatConn = nil
+local anchorConn = nil
+local charConn = nil
+
+local mobileUp = false
+local mobileDown = false
+
+local currentVelocity = Vector3.zero
+local currentPitch = 0
+local currentRoll = 0
+local baseFOV = 70
+pcall(function() baseFOV = Camera.FieldOfView end)
+
+local flightVFX = {}
+
+local function lerp(a, b, t)
+    return a + (b - a) * t
+end
+
+local function GetOrCreatePlatform()
+    if platform and platform.Parent then
+        return platform
+    end
+    local p = Instance.new("Part")
+    p.Name = PLATFORM_NAME
+    p.Size = Vector3.new(4, 0.2, 4)
+    p.Transparency = 1
+    p.CanCollide = true
+    p.CanTouch = false
+    p.CanQuery = true
+    p.Anchored = true
+    p.Material = Enum.Material.SmoothPlastic
+    p.CustomPhysicalProperties = PhysicalProperties.new(0.01, 0, 0, 0, 0)
+    p.Parent = workspace
+    platform = p
+    return platform
+end
+
+local function CreateFlightVFX(hrp)
+    if flightVFX.trail then return end
+
+    local att0 = Instance.new("Attachment")
+    att0.Name = "Velocity_TrailAtt0"
+    att0.Position = Vector3.new(-0.85, -2.2, 0.3)
+    att0.Parent = hrp
+
+    local att1 = Instance.new("Attachment")
+    att1.Name = "Velocity_TrailAtt1"
+    att1.Position = Vector3.new(0.85, -2.2, 0.3)
+    att1.Parent = hrp
+
+    local trail = Instance.new("Trail")
+    trail.Name = "Velocity_FlightTrail"
+    trail.Attachment0 = att0
+    trail.Attachment1 = att1
+    trail.Lifetime = 0.32
+    trail.LightEmission = 1
+    trail.LightInfluence = 0
+    trail.Transparency = NumberSequence.new({
+        NumberSequenceKeypoint.new(0, 0.15),
+        NumberSequenceKeypoint.new(0.6, 0.4),
+        NumberSequenceKeypoint.new(1, 1)
+    })
+    trail.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(0, 240, 255)),
+        ColorSequenceKeypoint.new(0.5, Color3.fromRGB(120, 70, 255)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(255, 50, 180))
+    })
+    trail.WidthScale = NumberSequence.new({
+        NumberSequenceKeypoint.new(0, 0.7),
+        NumberSequenceKeypoint.new(1, 0)
+    })
+    trail.Enabled = false
+    trail.Parent = hrp
+
+    flightVFX.att0 = att0
+    flightVFX.att1 = att1
+    flightVFX.trail = trail
+end
+
+local function RemoveFlightVFX()
+    for _, item in pairs(flightVFX) do
+        if item and item.Parent then
+            pcall(function() item:Destroy() end)
+        end
+    end
+    flightVFX = {}
+end
+
+local function GetRawMoveDirection()
+    local cam = workspace.CurrentCamera
+    if not cam then return Vector3.zero end
+    
+    local dir = Vector3.zero
+
+    if UserInputService:IsKeyDown(Enum.KeyCode.W) then
+        dir = dir + cam.CFrame.LookVector
+    end
+    if UserInputService:IsKeyDown(Enum.KeyCode.S) then
+        dir = dir - cam.CFrame.LookVector
+    end
+    if UserInputService:IsKeyDown(Enum.KeyCode.D) then
+        dir = dir + cam.CFrame.RightVector
+    end
+    if UserInputService:IsKeyDown(Enum.KeyCode.A) then
+        dir = dir - cam.CFrame.RightVector
+    end
+    if UserInputService:IsKeyDown(Enum.KeyCode.Space) or mobileUp then
+        dir = dir + Vector3.new(0, 1, 0)
+    end
+    if UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) or UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) or mobileDown then
+        dir = dir - Vector3.new(0, 1, 0)
+    end
+
+    local char = Player.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if dir.Magnitude < 0.05 and hum and hum.MoveDirection.Magnitude > 0.05 then
+        local camLook = cam.CFrame.LookVector
+        local camRight = cam.CFrame.RightVector
+        local flatLook = Vector3.new(camLook.X, 0, camLook.Z).Unit
+        local flatRight = Vector3.new(camRight.X, 0, camRight.Z).Unit
+        dir = (flatRight * hum.MoveDirection.X) + (flatLook * -hum.MoveDirection.Z)
+    end
+
+    return dir
+end
+
+local function StartFly()
+    isFlying = true
+    local char = Player.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+
+    pcall(function() baseFOV = Camera.FieldOfView end)
+
+    if hum then
+        hum:SetStateEnabled(Enum.HumanoidStateType.Freefall, false)
+        hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+        hum:ChangeState(Enum.HumanoidStateType.Running)
+    end
+
+    if hrp then
+        hrp.Anchored = false
+        CreateFlightVFX(hrp)
+
+        if anchorConn then anchorConn:Disconnect() end
+        anchorConn = hrp:GetPropertyChangedSignal("Anchored"):Connect(function()
+            if isFlying and hrp.Anchored then
+                hrp.Anchored = false
+            end
+        end)
+    end
+
+    currentVelocity = Vector3.zero
+    currentPitch = 0
+    currentRoll = 0
+
+    if heartbeatConn then heartbeatConn:Disconnect() end
+    heartbeatConn = RunService.Heartbeat:Connect(function(dt)
+        if not isFlying then return end
+
+        local c = Player.Character
+        local root = c and c:FindFirstChild("HumanoidRootPart")
+        local humanoid = c and c:FindFirstChildOfClass("Humanoid")
+        if not (c and root and humanoid and humanoid.Health > 0) then return end
+
+        if root.Anchored then
+            root.Anchored = false
+        end
+
+        local rawDir = GetRawMoveDirection()
+        local plat = GetOrCreatePlatform()
+        local cam = workspace.CurrentCamera
+
+        local targetVelocity = (rawDir.Magnitude > 0.05) and (rawDir.Unit * flySpeed) or Vector3.zero
+        currentVelocity = currentVelocity:Lerp(targetVelocity, math.clamp(dt * 7.5, 0, 1))
+
+        local speedRatio = currentVelocity.Magnitude / math.max(flySpeed, 1)
+
+        if flightVFX.trail then
+            flightVFX.trail.Enabled = (speedRatio > 0.15)
+        end
+
+        if cam then
+            local targetFOV = baseFOV + (speedRatio * 5.5)
+            cam.FieldOfView = lerp(cam.FieldOfView, targetFOV, math.clamp(dt * 6, 0, 1))
+        end
+
+        local idleBob = 0
+        if speedRatio < 0.1 then
+            idleBob = math.sin(os.clock() * 2.8) * 0.22
+        end
+
+        local targetPitch = 0
+        local targetRoll = 0
+
+        if cam and speedRatio > 0.05 then
+            local flatLook = Vector3.new(cam.CFrame.LookVector.X, 0, cam.CFrame.LookVector.Z).Unit
+            local flatRight = Vector3.new(cam.CFrame.RightVector.X, 0, cam.CFrame.RightVector.Z).Unit
+            
+            local forwardDot = currentVelocity.Unit:Dot(flatLook)
+            local rightDot = currentVelocity.Unit:Dot(flatRight)
+
+            targetPitch = -forwardDot * math.rad(24 * speedRatio)
+            targetRoll = -rightDot * math.rad(20 * speedRatio)
+        end
+
+        currentPitch = lerp(currentPitch, targetPitch, math.clamp(dt * 6, 0, 1))
+        currentRoll = lerp(currentRoll, targetRoll, math.clamp(dt * 6, 0, 1))
+
+        if cam then
+            local camLook = cam.CFrame.LookVector
+            local yawAngle = math.atan2(-camLook.X, -camLook.Z)
+            root.CFrame = CFrame.new(root.Position) 
+                * CFrame.Angles(0, yawAngle, 0) 
+                * CFrame.Angles(currentPitch, 0, currentRoll)
+        end
+
+        local yOffset = 3.12 - idleBob
+        if currentVelocity.Y < -5 then
+            yOffset = 3.75
+        end
+        plat.CFrame = CFrame.new(root.Position.X, root.Position.Y - yOffset, root.Position.Z)
+
+        if speedRatio > 0.03 then
+            root.AssemblyLinearVelocity = currentVelocity
+        else
+            root.AssemblyLinearVelocity = Vector3.new(0, idleBob * 4 - 0.35, 0)
+        end
+    end)
+end
+
+local function StopFly()
+    isFlying = false
+    if heartbeatConn then 
+        heartbeatConn:Disconnect() 
+        heartbeatConn = nil 
+    end
+    if anchorConn then 
+        anchorConn:Disconnect() 
+        anchorConn = nil 
+    end
+
+    RemoveFlightVFX()
+
+    if platform and platform.Parent then
+        pcall(function() platform:Destroy() end)
+        platform = nil
+    end
+
+    local char = Player.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+
+    if hum then
+        hum:SetStateEnabled(Enum.HumanoidStateType.Freefall, true)
+        hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, true)
+    end
+    if hrp then
+        hrp.AssemblyLinearVelocity = Vector3.zero
+        local flatYaw = math.atan2(-hrp.CFrame.LookVector.X, -hrp.CFrame.LookVector.Z)
+        hrp.CFrame = CFrame.new(hrp.Position) * CFrame.Angles(0, flatYaw, 0)
+    end
+
+    pcall(function()
+        Camera.FieldOfView = baseFOV
+    end)
+end
+
+local function ToggleFly()
+    if isFlying then
+        StopFly()
+    else
+        StartFly()
+    end
+end
+
+charConn = Player.CharacterAdded:Connect(function()
+    if isFlying then
+        StopFly()
+    end
+end)
+
 task.spawn(function()
     while true do
         if isScriptLoaded then
@@ -128,7 +420,7 @@ end
 local function rotateVectorHorizontally(vec, angleDeg)
     local rad = math.rad(angleDeg)
     local cosAngle = math.cos(rad)
-    local sinAngle = math.sin(rad)
+    sinAngle = math.sin(rad)
     return Vector3.new(
         vec.X * cosAngle - vec.Z * sinAngle, 
         0, 
@@ -1114,6 +1406,26 @@ LeftBlockCombat:CreateKeybind({
     Flag = "CustomDashBetaKeybind", 
     Callback = function() 
         PerformCustomDash() 
+    end
+})
+
+LeftBlockCombat:CreateKeybind({
+    Name = "Fly Keybind", 
+    Default = Enum.KeyCode.X, 
+    Flag = "FlyKeybind", 
+    Callback = function() 
+        ToggleFly()
+    end
+})
+
+LeftBlockCombat:CreateSlider({
+    Name = "Fly Speed", 
+    Min = 20, 
+    Max = 200, 
+    Default = 65, 
+    Flag = "FlySpeedSlider", 
+    Callback = function(Value) 
+        flySpeed = math.floor(Value)
     end
 })
 
