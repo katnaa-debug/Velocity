@@ -421,7 +421,7 @@ end
 local function rotateVectorHorizontally(vec, angleDeg)
     local rad = math.rad(angleDeg)
     local cosAngle = math.cos(rad)
-    local sinAngle = math.sin(rad)
+    sinAngle = math.sin(rad)
     return Vector3.new(
         vec.X * cosAngle - vec.Z * sinAngle, 
         0, 
@@ -1224,26 +1224,8 @@ local function ProcessUltraLowLatency(ball, hrp, now)
     end
 
     local playerPos = hrp.Position
-    local ballPos = ball.Position
-    local dist = (playerPos - ballPos).Magnitude
-
-    local ultraCloseDist = math.clamp(14.0 + (currentRealPing * 65), 12.0, 24.0)
-
-    if dist <= ultraCloseDist then
-        parriedBalls[ball] = true
-        lastParryTime = now
-        RegisterParryAttempt(now)
-        TriggerParryInput()
-
-        local ballVel = ball.AssemblyLinearVelocity
-        local speed = ballVel and ballVel.Magnitude or 0
-        if autoAbilitiesEnabled and speed >= 120 then
-            task.delay(0.06, TriggerAbilityDefend)
-        end
-        return
-    end
-
     local playerVel = hrp.AssemblyLinearVelocity
+    local ballPos = ball.Position
     local ballVel = ball.AssemblyLinearVelocity
     local speed = ballVel.Magnitude
 
@@ -1252,37 +1234,41 @@ local function ProcessUltraLowLatency(ball, hrp, now)
     end
 
     local toPlayer = playerPos - ballPos
+    local dist = toPlayer.Magnitude
     local toPlayerUnit = (dist > 0.01) and toPlayer.Unit or Vector3.new(0, 1, 0)
+    
     local rawApproachSpeed = (ballVel - playerVel):Dot(toPlayerUnit)
+    local isRetreating = rawApproachSpeed < -2
 
-    if rawApproachSpeed < -3 and dist > ultraCloseDist then
+    if isRetreating and dist > 12.0 then
         return
     end
 
-    local realETA = dist / math.max(rawApproachSpeed, speed * 0.4)
-    local adjustedETA = realETA - currentRealPing
+    local approachSpeed = rawApproachSpeed
+    if approachSpeed <= 0 and not isRetreating then
+        approachSpeed = speed * 0.40
+    elseif approachSpeed <= 0 and isRetreating then
+        approachSpeed = 0.1
+    end
 
-    local currentBaseETA = BASE_ETA_THRESHOLD
-    if botAutoAdaptEnabled then
-        currentBaseETA = 0.22 + (currentRealPing * 0.85)
-    else
-        if speed <= 70 then
-            currentBaseETA = currentBaseETA + 0.12
-        elseif speed >= 200 then
-            currentBaseETA = currentBaseETA + math.clamp((speed - 200) * 0.0005, 0, 0.20)
-        end
+    local realETA = dist / math.max(approachSpeed, 1)
+    local adjustedETA = realETA - currentRealPing - PARRY_SAFETY_BUFFER
+
+    local baseETA = 0.24 + math.clamp(currentRealPing * 0.4, 0, 0.10)
+    if speed >= 180 then
+        baseETA = baseETA + math.clamp((speed - 180) * 0.0004, 0, 0.15)
     end
 
     local dot = ballVel.Unit:Dot(toPlayerUnit)
     local shouldParry = false
 
-    if dist <= CLASH_DISTANCE then
+    if dist <= CLASH_DISTANCE and (not isRetreating or dist <= 13.0) then
         shouldParry = true
     elseif dist <= EMERGENCY_DISTANCE then
         shouldParry = true
-    elseif dot < 0.3 and (dist <= (SLOW_BALL_RADIUS + (speed * 0.1))) then
+    elseif dot < 0.25 and dot > -0.2 and (dist <= (SLOW_BALL_RADIUS + (speed * 0.1))) and not isRetreating then
         shouldParry = true
-    elseif adjustedETA <= currentBaseETA then
+    elseif adjustedETA <= baseETA and not isRetreating then
         shouldParry = true
     end
 
