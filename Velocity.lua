@@ -5,6 +5,7 @@ local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local Lighting = game:GetService("Lighting")
 local TweenService = game:GetService("TweenService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
 local Camera = workspace.CurrentCamera
 local Player = Players.LocalPlayer
 
@@ -420,7 +421,7 @@ end
 local function rotateVectorHorizontally(vec, angleDeg)
     local rad = math.rad(angleDeg)
     local cosAngle = math.cos(rad)
-    sinAngle = math.sin(rad)
+    local sinAngle = math.sin(rad)
     return Vector3.new(
         vec.X * cosAngle - vec.Z * sinAngle, 
         0, 
@@ -584,77 +585,51 @@ task.spawn(function()
     end
 end)
 
-local lastFlickTime = 0
-local cachedFlickTarget = nil
-
-local function FlickCameraToRandomPlayer()
-    if not botEnabled then 
-        return 
-    end
-    
-    pcall(function()
-        local now = os.clock()
-        
-        if now - lastFlickTime > 0.2 or not cachedFlickTarget or not cachedFlickTarget.Parent then
-            local alive = {}
-            for _, p in ipairs(Players:GetPlayers()) do
-                if p ~= Player and p.Character and p.Character:FindFirstChild("HumanoidRootPart") then
-                    local h = p.Character:FindFirstChildOfClass("Humanoid")
-                    if h and h.Health > 0 then 
-                        table.insert(alive, p) 
-                    end
-                end
-            end
-            
-            if #alive > 0 then 
-                cachedFlickTarget = alive[math.random(1, #alive)].Character.HumanoidRootPart
-            else
-                cachedFlickTarget = nil
-            end
-            lastFlickTime = now
-        end
-
-        if not cachedFlickTarget then 
-            return 
-        end
-        
-        local targetPos = cachedFlickTarget.Position
-        local cam = workspace.CurrentCamera
-        local camPos = cam.CFrame.Position
-        local lookVec = cam.CFrame.LookVector
-
-        local clampedY = math.clamp(lookVec.Y, -0.99, 0.99)
-        local currentPitch = math.asin(clampedY)
-
-        local dx = targetPos.X - camPos.X
-        local dz = targetPos.Z - camPos.Z
-        local targetYaw = math.atan2(-dx, -dz)
-
-        cam.CFrame = CFrame.new(camPos) * CFrame.Angles(0, targetYaw, 0) * CFrame.Angles(currentPitch, 0, 0)
-    end)
-end
-
-local function SendVIMKey(key)
-    pcall(function()
-        local VIM = game:GetService("VirtualInputManager")
-        if VIM then
-            VIM:SendKeyEvent(true, key, false, game)
-            VIM:SendKeyEvent(false, key, false, game)
-        end
-    end)
-end
+local hasMouseClick = type(mouse1click) == "function"
 
 local function TriggerParryInput()
-    FlickCameraToRandomPlayer()
-
-    pcall(function()
-        if type(mouse1click) == "function" then 
-            mouse1click() 
-        else 
-            SendVIMKey(Enum.KeyCode.F) 
-        end
-    end)
+    if hasMouseClick then
+        mouse1click()
+    elseif VirtualInputManager then
+        VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.F, false, game)
+        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.F, false, game)
+    end
 end
+
+task.spawn(function()
+    local accumulator = 0
+    local lastTime = os.clock()
+
+    while true do
+        local now = os.clock()
+        local dt = now - lastTime
+        lastTime = now
+
+        if manualClickerEnabled or (autoClashDetectorEnabled and autoClashActive) then
+            local cps = math.max(targetCPS, 1)
+            local interval = 1 / cps
+            accumulator = accumulator + dt
+
+            local maxBatch = math.clamp(math.ceil(cps / 30), 1, 6)
+            local clicks = 0
+
+            while accumulator >= interval and clicks < maxBatch do
+                TriggerParryInput()
+                accumulator = accumulator - interval
+                clicks = clicks + 1
+            end
+
+            if accumulator > interval * 2 then
+                accumulator = 0
+            end
+
+            task.wait()
+        else
+            accumulator = 0
+            task.wait(0.1)
+        end
+    end
+end)
 
 local function IsAbilityOnCooldown()
     local pGui = Player:FindFirstChild("PlayerGui")
@@ -718,36 +693,16 @@ local function TriggerAbilityDefend()
                     pcall(function() keyrelease(0x51) end)
                 end)
             else
-                local VIM = game:GetService("VirtualInputManager")
-                if VIM then
-                    VIM:SendKeyEvent(true, Enum.KeyCode.Q, false, nil)
+                if VirtualInputManager then
+                    VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Q, false, nil)
                     task.delay(0.04, function()
-                        pcall(function() VIM:SendKeyEvent(false, Enum.KeyCode.Q, false, nil) end)
+                        pcall(function() VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Q, false, nil) end)
                     end)
                 end
             end
         end)
     end)
 end
-
-task.spawn(function()
-    local nextClickTime = 0
-    while true do
-        if manualClickerEnabled or (autoClashDetectorEnabled and autoClashActive) then
-            local now = os.clock()
-            local interval = 1 / math.clamp(targetCPS, 30, 500)
-            
-            if now >= nextClickTime then
-                TriggerParryInput()
-                nextClickTime = now + interval
-            end
-            task.wait()
-        else
-            nextClickTime = 0
-            task.wait(0.25)
-        end
-    end
-end)
 
 local function ClearAllBallBillboards()
     for ball, bbg in pairs(ballBillboards) do
@@ -1262,6 +1217,87 @@ local function ProcessIdenticalParry(ball, hrp, now)
     end
 end
 
+local function ProcessUltraLowLatency(ball, hrp, now)
+    local target = ball:GetAttribute("target") or ball:GetAttribute("Target") or ""
+    if target ~= Player.Name then 
+        return 
+    end
+
+    local playerPos = hrp.Position
+    local ballPos = ball.Position
+    local dist = (playerPos - ballPos).Magnitude
+
+    local ultraCloseDist = math.clamp(14.0 + (currentRealPing * 65), 12.0, 24.0)
+
+    if dist <= ultraCloseDist then
+        parriedBalls[ball] = true
+        lastParryTime = now
+        RegisterParryAttempt(now)
+        TriggerParryInput()
+
+        local ballVel = ball.AssemblyLinearVelocity
+        local speed = ballVel and ballVel.Magnitude or 0
+        if autoAbilitiesEnabled and speed >= 120 then
+            task.delay(0.06, TriggerAbilityDefend)
+        end
+        return
+    end
+
+    local playerVel = hrp.AssemblyLinearVelocity
+    local ballVel = ball.AssemblyLinearVelocity
+    local speed = ballVel.Magnitude
+
+    if speed < 0.1 then 
+        return 
+    end
+
+    local toPlayer = playerPos - ballPos
+    local toPlayerUnit = (dist > 0.01) and toPlayer.Unit or Vector3.new(0, 1, 0)
+    local rawApproachSpeed = (ballVel - playerVel):Dot(toPlayerUnit)
+
+    if rawApproachSpeed < -3 and dist > ultraCloseDist then
+        return
+    end
+
+    local realETA = dist / math.max(rawApproachSpeed, speed * 0.4)
+    local adjustedETA = realETA - currentRealPing
+
+    local currentBaseETA = BASE_ETA_THRESHOLD
+    if botAutoAdaptEnabled then
+        currentBaseETA = 0.22 + (currentRealPing * 0.85)
+    else
+        if speed <= 70 then
+            currentBaseETA = currentBaseETA + 0.12
+        elseif speed >= 200 then
+            currentBaseETA = currentBaseETA + math.clamp((speed - 200) * 0.0005, 0, 0.20)
+        end
+    end
+
+    local dot = ballVel.Unit:Dot(toPlayerUnit)
+    local shouldParry = false
+
+    if dist <= CLASH_DISTANCE then
+        shouldParry = true
+    elseif dist <= EMERGENCY_DISTANCE then
+        shouldParry = true
+    elseif dot < 0.3 and (dist <= (SLOW_BALL_RADIUS + (speed * 0.1))) then
+        shouldParry = true
+    elseif adjustedETA <= currentBaseETA then
+        shouldParry = true
+    end
+
+    if shouldParry then
+        parriedBalls[ball] = true
+        lastParryTime = now
+        RegisterParryAttempt(now)
+        TriggerParryInput()
+
+        if autoAbilitiesEnabled and speed >= 120 then
+            task.delay(0.06, TriggerAbilityDefend)
+        end
+    end
+end
+
 local function ProcessAutoParry()
     local now = os.clock()
     local char = Player.Character
@@ -1294,6 +1330,8 @@ local function ProcessAutoParry()
         ProcessSmartParry(ball, hrp, now) 
     elseif autoParryMode == "Identical" then
         ProcessIdenticalParry(ball, hrp, now)
+    elseif autoParryMode == "Ultra Low Latency" then
+        ProcessUltraLowLatency(ball, hrp, now)
     end
 end
 
@@ -1343,7 +1381,7 @@ local RightBlockPhysics = MainTab:CreateBlock({
 
 LeftBlockCombat:CreateDropdown({
     Name = "Auto Parry Mode", 
-    Items = {"Smart (Pro)", "Identical"}, 
+    Items = {"Smart (Pro)", "Identical", "Ultra Low Latency"}, 
     Default = "Smart (Pro)", 
     Flag = "AutoParryModeDrop", 
     Callback = function(Mode) 
@@ -1452,7 +1490,7 @@ LeftBlockCombat:CreateKeybind({
 
 LeftBlockCombat:CreateSlider({
     Name = "Clicker Speed (CPS)", 
-    Min = 30, 
+    Min = 10, 
     Max = 500, 
     Default = 150, 
     Flag = "ClickerCPS", 
