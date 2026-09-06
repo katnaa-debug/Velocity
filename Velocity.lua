@@ -26,8 +26,10 @@ local autoParryMode = "Smart (Pro)"
 local manualClickerEnabled = false
 local autoClashDetectorEnabled = false
 local autoClashActive = false
-local targetCPS = 150
+local targetCPS = 30
 local autoClashThreshold = 4
+
+local lastParryInputTime = 0
 
 local movementModifiersEnabled = false
 local customWalkSpeed = 36
@@ -421,7 +423,7 @@ end
 local function rotateVectorHorizontally(vec, angleDeg)
     local rad = math.rad(angleDeg)
     local cosAngle = math.cos(rad)
-    sinAngle = math.sin(rad)
+    local sinAngle = math.sin(rad)
     return Vector3.new(
         vec.X * cosAngle - vec.Z * sinAngle, 
         0, 
@@ -588,45 +590,51 @@ end)
 local hasMouseClick = type(mouse1click) == "function"
 
 local function TriggerParryInput()
-    if hasMouseClick then
-        mouse1click()
-    elseif VirtualInputManager then
-        VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.F, false, game)
-        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.F, false, game)
+    local now = os.clock()
+    if (now - lastParryInputTime) < 0.035 then
+        return
+    end
+    lastParryInputTime = now
+
+    local pGui = Player:FindFirstChild("PlayerGui")
+    if pGui and type(firesignal) == "function" then
+        local hotbar = pGui:FindFirstChild("Hotbar")
+        if hotbar then
+            local block = hotbar:FindFirstChild("Block") or hotbar:FindFirstChild("Parry")
+            local btn = block and (block:FindFirstChild("Pressable1") or block:FindFirstChild("Pressable") or (block:IsA("GuiButton") and block))
+            if btn then
+                pcall(function()
+                    firesignal(btn.Activated)
+                end)
+            end
+        end
+    end
+
+    if VirtualInputManager then
+        pcall(function()
+            VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 0)
+            task.delay(0.015, function()
+                pcall(function()
+                    VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 0)
+                end)
+            end)
+        end)
+    elseif hasMouseClick then
+        pcall(function()
+            mouse1click()
+        end)
     end
 end
 
 task.spawn(function()
-    local accumulator = 0
-    local lastTime = os.clock()
-
     while true do
-        local now = os.clock()
-        local dt = now - lastTime
-        lastTime = now
-
         if manualClickerEnabled or (autoClashDetectorEnabled and autoClashActive) then
-            local cps = math.max(targetCPS, 1)
-            local interval = 1 / cps
-            accumulator = accumulator + dt
-
-            local maxBatch = math.clamp(math.ceil(cps / 30), 1, 6)
-            local clicks = 0
-
-            while accumulator >= interval and clicks < maxBatch do
-                TriggerParryInput()
-                accumulator = accumulator - interval
-                clicks = clicks + 1
-            end
-
-            if accumulator > interval * 2 then
-                accumulator = 0
-            end
-
-            task.wait()
+            local safeCPS = math.clamp(targetCPS, 5, 28)
+            local interval = 1 / safeCPS
+            TriggerParryInput()
+            task.wait(interval)
         else
-            accumulator = 0
-            task.wait(0.1)
+            task.wait(0.05)
         end
     end
 end)
@@ -685,6 +693,9 @@ local function TriggerAbilityDefend()
     
     task.defer(function()
         pcall(function()
+            if PressAbilityButton() then
+                return
+            end
             if type(keyclick) == "function" then
                 keyclick(Enum.KeyCode.Q)
             elseif type(keypress) == "function" and type(keyrelease) == "function" then
@@ -969,11 +980,11 @@ local function CheckClashDeactivation(now, ball, hrp)
         shouldInstantlyKill = true 
     end
 
-    if (now - lastClashActivity) > 0.5 then 
+    if (now - lastClashActivity) > 0.6 then 
         shouldInstantlyKill = true 
     end
 
-    if #parryHistory < 2 then
+    if #parryHistory < 2 and (now - lastClashActivity) > 0.35 then
         shouldInstantlyKill = true
     end
 
@@ -1098,6 +1109,9 @@ local function ProcessSmartParry(ball, hrp, now)
     end
     
     if shouldParry then
+        if (now - lastParryTime) < 0.06 and not autoClashActive then 
+            return 
+        end
         parriedBalls[ball] = true
         lastParryTime = now
         RegisterParryAttempt(now)
@@ -1206,6 +1220,9 @@ local function ProcessIdenticalParry(ball, hrp, now)
     end
 
     if shouldParry then
+        if (now - lastParryTime) < 0.06 and not autoClashActive then 
+            return 
+        end
         parriedBalls[ball] = true
         lastParryTime = now
         RegisterParryAttempt(now)
@@ -1273,6 +1290,9 @@ local function ProcessUltraLowLatency(ball, hrp, now)
     end
 
     if shouldParry then
+        if (now - lastParryTime) < 0.06 and not autoClashActive then 
+            return 
+        end
         parriedBalls[ball] = true
         lastParryTime = now
         RegisterParryAttempt(now)
@@ -1476,9 +1496,9 @@ LeftBlockCombat:CreateKeybind({
 
 LeftBlockCombat:CreateSlider({
     Name = "Clicker Speed (CPS)", 
-    Min = 10, 
-    Max = 500, 
-    Default = 150, 
+    Min = 5, 
+    Max = 60, 
+    Default = 30, 
     Flag = "ClickerCPS", 
     Callback = function(Value) 
         targetCPS = Value 
@@ -1534,7 +1554,7 @@ local BaseEtaSlider
 local HighSpeedSlider
 local EmergencyDistSlider
 
-Presets = {
+local Presets = {
     ["Competitive (Balanced)"] = {
         ClashDist = 18.0, 
         Curve = -0.15, 
