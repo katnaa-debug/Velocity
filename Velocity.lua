@@ -517,12 +517,33 @@ RunService.Heartbeat:Connect(function(dt)
         local minY, maxY = -halfH, halfH
         local minZ, maxZ = -halfT, halfT
 
+        local deadzoneRadius = math.min(halfW, halfT) * 0.65
+        local horizDist = math.sqrt(dodgeLocalPos.X^2 + dodgeLocalPos.Z^2)
+
+        if horizDist < deadzoneRadius then
+            local nx = horizDist > 0.01 and (dodgeLocalPos.X / horizDist) or (math.random() > 0.5 and 1 or -1)
+            local nz = horizDist > 0.01 and (dodgeLocalPos.Z / horizDist) or (math.random() > 0.5 and 1 or -1)
+            dodgeLocalPos = Vector3.new(nx * deadzoneRadius, dodgeLocalPos.Y, nz * deadzoneRadius)
+
+            local side = (math.random() > 0.5 and 1 or -1)
+            local tx = -nz * side
+            local tz = nx * side
+            local outDir = Vector3.new(nx * 0.3 + tx * 0.9, (math.random(-60, 60) / 100), nz * 0.3 + tz * 0.9)
+            if outDir.Magnitude > 0.01 then
+                dodgeVel = outDir.Unit * dodgeSpeed
+            end
+        end
+
         if dodgeLocalPos.X >= maxX then
             dodgeLocalPos = Vector3.new(maxX, dodgeLocalPos.Y, dodgeLocalPos.Z)
-            dodgeVel = Vector3.new(-math.abs(dodgeVel.X), dodgeVel.Y, dodgeVel.Z)
+            local randY = math.random(-80, 80) / 100
+            local randZ = (math.random() > 0.5 and 1 or -1) * (math.random(40, 100) / 100)
+            dodgeVel = Vector3.new(-math.abs(dodgeVel.X), randY * dodgeSpeed, randZ * dodgeSpeed).Unit * dodgeSpeed
         elseif dodgeLocalPos.X <= minX then
             dodgeLocalPos = Vector3.new(minX, dodgeLocalPos.Y, dodgeLocalPos.Z)
-            dodgeVel = Vector3.new(math.abs(dodgeVel.X), dodgeVel.Y, dodgeVel.Z)
+            local randY = math.random(-80, 80) / 100
+            local randZ = (math.random() > 0.5 and 1 or -1) * (math.random(40, 100) / 100)
+            dodgeVel = Vector3.new(math.abs(dodgeVel.X), randY * dodgeSpeed, randZ * dodgeSpeed).Unit * dodgeSpeed
         end
 
         if dodgeLocalPos.Y >= maxY then
@@ -535,10 +556,14 @@ RunService.Heartbeat:Connect(function(dt)
 
         if dodgeLocalPos.Z >= maxZ then
             dodgeLocalPos = Vector3.new(dodgeLocalPos.X, dodgeLocalPos.Y, maxZ)
-            dodgeVel = Vector3.new(dodgeVel.X, dodgeVel.Y, -math.abs(dodgeVel.Z))
+            local randY = math.random(-80, 80) / 100
+            local randX = (math.random() > 0.5 and 1 or -1) * (math.random(40, 100) / 100)
+            dodgeVel = Vector3.new(randX * dodgeSpeed, randY * dodgeSpeed, -math.abs(dodgeVel.Z)).Unit * dodgeSpeed
         elseif dodgeLocalPos.Z <= minZ then
             dodgeLocalPos = Vector3.new(dodgeLocalPos.X, dodgeLocalPos.Y, minZ)
-            dodgeVel = Vector3.new(dodgeVel.X, dodgeVel.Y, math.abs(dodgeVel.Z))
+            local randY = math.random(-80, 80) / 100
+            local randX = (math.random() > 0.5 and 1 or -1) * (math.random(40, 100) / 100)
+            dodgeVel = Vector3.new(randX * dodgeSpeed, randY * dodgeSpeed, math.abs(dodgeVel.Z)).Unit * dodgeSpeed
         end
 
         local rot = hrp.CFrame.Rotation
