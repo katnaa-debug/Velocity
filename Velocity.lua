@@ -5,7 +5,6 @@ local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local Lighting = game:GetService("Lighting")
 local TweenService = game:GetService("TweenService")
-local VirtualInputManager = game:GetService("VirtualInputManager")
 local Camera = workspace.CurrentCamera
 local Player = Players.LocalPlayer
 
@@ -587,49 +586,82 @@ task.spawn(function()
     end
 end)
 
-local hasMouseClick = type(mouse1click) == "function"
+local lastFlickTime = 0
+local cachedFlickTarget = nil
+
+local function FlickCameraToRandomPlayer()
+    if not botEnabled then 
+        return 
+    end
+    
+    pcall(function()
+        local now = os.clock()
+        
+        if now - lastFlickTime > 0.2 or not cachedFlickTarget or not cachedFlickTarget.Parent then
+            local alive = {}
+            for _, p in ipairs(Players:GetPlayers()) do
+                if p ~= Player and p.Character and p.Character:FindFirstChild("HumanoidRootPart") then
+                    local h = p.Character:FindFirstChildOfClass("Humanoid")
+                    if h and h.Health > 0 then 
+                        table.insert(alive, p) 
+                    end
+                end
+            end
+            
+            if #alive > 0 then 
+                cachedFlickTarget = alive[math.random(1, #alive)].Character.HumanoidRootPart
+            else
+                cachedFlickTarget = nil
+            end
+            lastFlickTime = now
+        end
+
+        if not cachedFlickTarget then 
+            return 
+        end
+        
+        local targetPos = cachedFlickTarget.Position
+        local cam = workspace.CurrentCamera
+        local camPos = cam.CFrame.Position
+        local lookVec = cam.CFrame.LookVector
+
+        local clampedY = math.clamp(lookVec.Y, -0.99, 0.99)
+        local currentPitch = math.asin(clampedY)
+
+        local dx = targetPos.X - camPos.X
+        local dz = targetPos.Z - camPos.Z
+        local targetYaw = math.atan2(-dx, -dz)
+
+        cam.CFrame = CFrame.new(camPos) * CFrame.Angles(0, targetYaw, 0) * CFrame.Angles(currentPitch, 0, 0)
+    end)
+end
+
+local function SendVIMKey(key)
+    pcall(function()
+        local VIM = (type(cloneref) == "function" and cloneref(game:GetService("VirtualInputManager"))) or game:GetService("VirtualInputManager")
+        if VIM then
+            VIM:SendKeyEvent(true, key, false, game)
+            VIM:SendKeyEvent(false, key, false, game)
+        end
+    end)
+end
 
 local function TriggerParryInput()
-    local now = os.clock()
-    if (now - lastParryInputTime) < 0.035 then
-        return
-    end
-    lastParryInputTime = now
+    FlickCameraToRandomPlayer()
 
-    local pGui = Player:FindFirstChild("PlayerGui")
-    if pGui and type(firesignal) == "function" then
-        local hotbar = pGui:FindFirstChild("Hotbar")
-        if hotbar then
-            local block = hotbar:FindFirstChild("Block") or hotbar:FindFirstChild("Parry")
-            local btn = block and (block:FindFirstChild("Pressable1") or block:FindFirstChild("Pressable") or (block:IsA("GuiButton") and block))
-            if btn then
-                pcall(function()
-                    firesignal(btn.Activated)
-                end)
-            end
+    pcall(function()
+        if type(mouse1click) == "function" then 
+            mouse1click() 
+        else 
+            SendVIMKey(Enum.KeyCode.F) 
         end
-    end
-
-    if VirtualInputManager then
-        pcall(function()
-            VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 0)
-            task.delay(0.015, function()
-                pcall(function()
-                    VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 0)
-                end)
-            end)
-        end)
-    elseif hasMouseClick then
-        pcall(function()
-            mouse1click()
-        end)
-    end
+    end)
 end
 
 task.spawn(function()
     while true do
         if manualClickerEnabled or (autoClashDetectorEnabled and autoClashActive) then
-            local safeCPS = math.clamp(targetCPS, 5, 28)
+            local safeCPS = math.clamp(targetCPS, 5, 150)
             local interval = 1 / safeCPS
             TriggerParryInput()
             task.wait(interval)
@@ -657,35 +689,6 @@ local function IsAbilityOnCooldown()
     return false
 end
 
-local function PressAbilityButton()
-    local pGui = Player:FindFirstChild("PlayerGui")
-    if pGui then
-        for _, btn in ipairs(pGui:GetDescendants()) do
-            if (btn:IsA("ImageButton") or btn:IsA("TextButton")) and btn.Visible then
-                local name = btn.Name:lower()
-                if name == "ability" or name == "abilitybutton" or name == "useability" or name == "skill" then
-                    if type(firesignal) == "function" then
-                        firesignal(btn.Activated)
-                        return true
-                    end
-                end
-            end
-        end
-        local contextGui = pGui:FindFirstChild("ContextActionGui")
-        if contextGui then
-            for _, btn in ipairs(contextGui:GetDescendants()) do
-                if (btn:IsA("ImageButton") or btn:IsA("TextButton")) and btn.Visible and btn.Name:find("Q") then
-                    if type(firesignal) == "function" then
-                        firesignal(btn.Activated)
-                        return true
-                    end
-                end
-            end
-        end
-    end
-    return false
-end
-
 local function TriggerAbilityDefend()
     local now = os.clock()
     if (now - lastAbilityTime) < 7.0 then return end
@@ -693,9 +696,6 @@ local function TriggerAbilityDefend()
     
     task.defer(function()
         pcall(function()
-            if PressAbilityButton() then
-                return
-            end
             if type(keyclick) == "function" then
                 keyclick(Enum.KeyCode.Q)
             elseif type(keypress) == "function" and type(keyrelease) == "function" then
@@ -704,10 +704,11 @@ local function TriggerAbilityDefend()
                     pcall(function() keyrelease(0x51) end)
                 end)
             else
-                if VirtualInputManager then
-                    VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Q, false, nil)
+                local VIM = (type(cloneref) == "function" and cloneref(game:GetService("VirtualInputManager"))) or game:GetService("VirtualInputManager")
+                if VIM then
+                    VIM:SendKeyEvent(true, Enum.KeyCode.Q, false, nil)
                     task.delay(0.04, function()
-                        pcall(function() VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Q, false, nil) end)
+                        pcall(function() VIM:SendKeyEvent(false, Enum.KeyCode.Q, false, nil) end)
                     end)
                 end
             end
@@ -1497,7 +1498,7 @@ LeftBlockCombat:CreateKeybind({
 LeftBlockCombat:CreateSlider({
     Name = "Clicker Speed (CPS)", 
     Min = 5, 
-    Max = 60, 
+    Max = 150, 
     Default = 30, 
     Flag = "ClickerCPS", 
     Callback = function(Value) 
