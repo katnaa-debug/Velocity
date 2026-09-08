@@ -28,8 +28,6 @@ local autoClashActive = false
 local targetCPS = 30
 local autoClashThreshold = 4
 
-local lastParryInputTime = 0
-
 local movementModifiersEnabled = false
 local customWalkSpeed = 36
 local defaultGameWalkSpeed = 16
@@ -43,8 +41,27 @@ local id_timeHoleLock = false
 local autoAbilitiesEnabled = false
 local lastAbilityTime = 0
 
-local lastDashTime = 0
-local isDashing = false
+local autoDodgeEnabled = false
+local dodgeBoxVisible = false
+local dodgeOrigin = Vector3.zero
+local dodgeLocalPos = Vector3.zero
+local dodgeVel = Vector3.zero
+local dodgeSpeed = 500
+local dodgeBoxWidth = 30
+local dodgeBoxHeight = 60
+local dodgeBoxThickness = 20
+local dodgeBoxPart = nil
+local dodgeBoxSelection = nil
+
+local dodgeCamAnchor = Instance.new("Part")
+dodgeCamAnchor.Name = "Velocity_CamAnchor"
+dodgeCamAnchor.Size = Vector3.new(0.1, 0.1, 0.1)
+dodgeCamAnchor.Transparency = 1
+dodgeCamAnchor.CanCollide = false
+dodgeCamAnchor.CanTouch = false
+dodgeCamAnchor.CanQuery = false
+dodgeCamAnchor.Anchored = true
+dodgeCamAnchor.Parent = workspace
 
 local botEnabled = false
 local botAutoAdaptEnabled = false
@@ -113,6 +130,36 @@ local flightVFX = {}
 
 local function lerp(a, b, t)
     return a + (b - a) * t
+end
+
+local function GetOrCreateDodgeBox()
+    if dodgeBoxPart and dodgeBoxPart.Parent then
+        dodgeBoxPart.Size = Vector3.new(dodgeBoxWidth, dodgeBoxHeight, dodgeBoxThickness)
+        return dodgeBoxPart
+    end
+    local part = Instance.new("Part")
+    part.Name = "Velocity_DodgeBox"
+    part.Size = Vector3.new(dodgeBoxWidth, dodgeBoxHeight, dodgeBoxThickness)
+    part.Transparency = 1
+    part.CanCollide = false
+    part.CanTouch = false
+    part.CanQuery = false
+    part.Anchored = true
+    part.Material = Enum.Material.ForceField
+    part.Color = Color3.fromRGB(0, 240, 255)
+    part.Parent = workspace
+
+    local sel = Instance.new("SelectionBox")
+    sel.Name = "Velocity_DodgeBoxOutline"
+    sel.Adornee = part
+    sel.Color3 = Color3.fromRGB(0, 240, 255)
+    sel.LineThickness = 0.05
+    sel.Visible = false
+    sel.Parent = part
+
+    dodgeBoxPart = part
+    dodgeBoxSelection = sel
+    return dodgeBoxPart
 end
 
 local function GetOrCreatePlatform()
@@ -215,9 +262,11 @@ local function GetRawMoveDirection()
     if dir.Magnitude < 0.05 and hum and hum.MoveDirection.Magnitude > 0.05 then
         local camLook = cam.CFrame.LookVector
         local camRight = cam.CFrame.RightVector
-        local flatLook = Vector3.new(camLook.X, 0, camLook.Z).Unit
-        local flatRight = Vector3.new(camRight.X, 0, camRight.Z).Unit
-        dir = (flatRight * hum.MoveDirection.X) + (flatLook * -hum.MoveDirection.Z)
+        local flatLook = Vector3.new(camLook.X, 0, camLook.Z)
+        local flatRight = Vector3.new(camRight.X, 0, camRight.Z)
+        local fL = flatLook.Magnitude > 0.01 and flatLook.Unit or Vector3.new(0, 0, -1)
+        local fR = flatRight.Magnitude > 0.01 and flatRight.Unit or Vector3.new(1, 0, 0)
+        dir = (fR * hum.MoveDirection.X) + (fL * -hum.MoveDirection.Z)
     end
 
     return dir
@@ -373,9 +422,52 @@ local function ToggleFly()
     end
 end
 
+local function SetPhantomEvade(state)
+    local char = Player.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+
+    if state then
+        if not (char and hrp and hum and hum.Health > 0) then return end
+        dodgeOrigin = hrp.Position
+        dodgeCamAnchor.CFrame = CFrame.new(dodgeOrigin)
+        Camera.CameraSubject = dodgeCamAnchor
+        dodgeLocalPos = Vector3.zero
+        local vx = (math.random(60, 100) / 100) * (math.random() > 0.5 and 1 or -1)
+        local vy = (math.random(60, 100) / 100) * (math.random() > 0.5 and 1 or -1)
+        local vz = (math.random(60, 100) / 100) * (math.random() > 0.5 and 1 or -1)
+        dodgeVel = Vector3.new(vx, vy, vz).Unit * dodgeSpeed
+        autoDodgeEnabled = true
+    else
+        autoDodgeEnabled = false
+        if hum then
+            Camera.CameraSubject = hum
+        end
+        if hrp then
+            hrp.AssemblyLinearVelocity = Vector3.zero
+            if dodgeOrigin ~= Vector3.zero then
+                hrp.CFrame = CFrame.new(dodgeOrigin.X, hrp.Position.Y, dodgeOrigin.Z) * hrp.CFrame.Rotation
+            end
+        end
+    end
+    if isScriptLoaded then
+        Library:Notify({
+            Title = "Velocity", 
+            Content = state and "Phantom Evade: Active" or "Phantom Evade: Deactivated", 
+            Duration = 2
+        })
+    end
+end
+
 charConn = Player.CharacterAdded:Connect(function()
     if isFlying then
         StopFly()
+    end
+    SetPhantomEvade(false)
+    local c = Player.Character
+    local h = c and c:WaitForChild("Humanoid", 3)
+    if h then
+        Camera.CameraSubject = h
     end
 end)
 
@@ -388,12 +480,101 @@ task.spawn(function()
     end
 end)
 
-RunService.Heartbeat:Connect(function()
-    if movementModifiersEnabled and isScriptLoaded then
-        local char = Player.Character
-        local hum = char and char:FindFirstChildOfClass("Humanoid")
-        if hum and hum.WalkSpeed ~= customWalkSpeed then
-            hum.WalkSpeed = customWalkSpeed
+RunService.Heartbeat:Connect(function(dt)
+    if not isScriptLoaded then return end
+
+    local char = Player.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+
+    if movementModifiersEnabled and hum and hum.WalkSpeed ~= customWalkSpeed then
+        hum.WalkSpeed = customWalkSpeed
+    end
+
+    if autoDodgeEnabled and char and hum and hrp and hum.Health > 0 and not isFlying then
+        hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+        hum:SetStateEnabled(Enum.HumanoidStateType.Freefall, false)
+        hum:ChangeState(Enum.HumanoidStateType.Running)
+
+        local moveDir = hum.MoveDirection
+        if moveDir.Magnitude > 0.05 then
+            local moveSpeed = movementModifiersEnabled and customWalkSpeed or defaultGameWalkSpeed
+            dodgeOrigin = dodgeOrigin + (Vector3.new(moveDir.X, 0, moveDir.Z).Unit * (moveSpeed * dt))
+        end
+
+        dodgeCamAnchor.CFrame = CFrame.new(dodgeOrigin)
+        if Camera.CameraSubject ~= dodgeCamAnchor then
+            Camera.CameraSubject = dodgeCamAnchor
+        end
+
+        dodgeLocalPos = dodgeLocalPos + (dodgeVel * dt)
+
+        local halfW = dodgeBoxWidth / 2
+        local halfH = dodgeBoxHeight / 2
+        local halfT = dodgeBoxThickness / 2
+
+        local minX, maxX = -halfW, halfW
+        local minY, maxY = -halfH, halfH
+        local minZ, maxZ = -halfT, halfT
+
+        if dodgeLocalPos.X >= maxX then
+            dodgeLocalPos = Vector3.new(maxX, dodgeLocalPos.Y, dodgeLocalPos.Z)
+            dodgeVel = Vector3.new(-math.abs(dodgeVel.X), dodgeVel.Y, dodgeVel.Z)
+        elseif dodgeLocalPos.X <= minX then
+            dodgeLocalPos = Vector3.new(minX, dodgeLocalPos.Y, dodgeLocalPos.Z)
+            dodgeVel = Vector3.new(math.abs(dodgeVel.X), dodgeVel.Y, dodgeVel.Z)
+        end
+
+        if dodgeLocalPos.Y >= maxY then
+            dodgeLocalPos = Vector3.new(dodgeLocalPos.X, maxY, dodgeLocalPos.Z)
+            dodgeVel = Vector3.new(dodgeVel.X, -math.abs(dodgeVel.Y), dodgeVel.Z)
+        elseif dodgeLocalPos.Y <= minY then
+            dodgeLocalPos = Vector3.new(dodgeLocalPos.X, minY, dodgeLocalPos.Z)
+            dodgeVel = Vector3.new(dodgeVel.X, math.abs(dodgeVel.Y), dodgeVel.Z)
+        end
+
+        if dodgeLocalPos.Z >= maxZ then
+            dodgeLocalPos = Vector3.new(dodgeLocalPos.X, dodgeLocalPos.Y, maxZ)
+            dodgeVel = Vector3.new(dodgeVel.X, dodgeVel.Y, -math.abs(dodgeVel.Z))
+        elseif dodgeLocalPos.Z <= minZ then
+            dodgeLocalPos = Vector3.new(dodgeLocalPos.X, dodgeLocalPos.Y, minZ)
+            dodgeVel = Vector3.new(dodgeVel.X, dodgeVel.Y, math.abs(dodgeVel.Z))
+        end
+
+        local rot = hrp.CFrame.Rotation
+        local cam = workspace.CurrentCamera
+        if UserInputService.MouseBehavior == Enum.MouseBehavior.LockCenter and cam then
+            local camLook = cam.CFrame.LookVector
+            local yaw = math.atan2(-camLook.X, -camLook.Z)
+            rot = CFrame.Angles(0, yaw, 0)
+        end
+
+        hrp.CFrame = CFrame.new(dodgeOrigin + dodgeLocalPos) * rot
+        hrp.AssemblyLinearVelocity = dodgeVel
+
+        local box = GetOrCreateDodgeBox()
+        box.Size = Vector3.new(dodgeBoxWidth, dodgeBoxHeight, dodgeBoxThickness)
+        box.CFrame = CFrame.new(dodgeOrigin)
+        if dodgeBoxVisible then
+            box.Transparency = 0.82
+            if dodgeBoxSelection then
+                dodgeBoxSelection.Visible = true
+            end
+        else
+            box.Transparency = 1
+            if dodgeBoxSelection then
+                dodgeBoxSelection.Visible = false
+            end
+        end
+    else
+        if Camera.CameraSubject == dodgeCamAnchor and hum then
+            Camera.CameraSubject = hum
+        end
+        if dodgeBoxPart then
+            dodgeBoxPart.Transparency = 1
+            if dodgeBoxSelection then
+                dodgeBoxSelection.Visible = false
+            end
         end
     end
 end)
@@ -428,53 +609,6 @@ local function rotateVectorHorizontally(vec, angleDeg)
         0, 
         vec.X * sinAngle + vec.Z * cosAngle
     ).Unit
-end
-
-local function PerformCustomDash()
-    local now = os.clock()
-    if isDashing or (now - lastDashTime) < 0.35 then 
-        return 
-    end
-
-    local char = Player.Character
-    local hum = char and char:FindFirstChildOfClass("Humanoid")
-    local hrp = char and char:FindFirstChild("HumanoidRootPart")
-    
-    if not (char and hum and hrp and hum.Health > 0) then 
-        return 
-    end
-
-    local moveDir = hum.MoveDirection
-    local dashDir
-
-    if moveDir.Magnitude > 0.05 then
-        dashDir = Vector3.new(moveDir.X, 0, moveDir.Z).Unit
-    else
-        local flatLook = Vector3.new(hrp.CFrame.LookVector.X, 0, hrp.CFrame.LookVector.Z)
-        if flatLook.Magnitude > 0.05 then
-            dashDir = flatLook.Unit
-        else
-            dashDir = hrp.CFrame.LookVector
-        end
-    end
-
-    isDashing = true
-    lastDashTime = now
-
-    local bv = Instance.new("BodyVelocity")
-    bv.Name = "Velocity_BypassDash"
-    bv.MaxForce = Vector3.new(2000000, 0, 2000000)
-    bv.Velocity = dashDir * 280
-    bv.Parent = hrp
-
-    hrp.AssemblyLinearVelocity = Vector3.new(dashDir.X * 280, hrp.AssemblyLinearVelocity.Y, dashDir.Z * 280)
-
-    task.delay(0.18, function()
-        pcall(function()
-            bv:Destroy()
-        end)
-        isDashing = false
-    end)
 end
 
 task.spawn(function()
@@ -1369,6 +1503,10 @@ local Window = Library:CreateWindow({
 })
 
 local MainTab = Window:CreateTab("Main", true)
+local ProtectionTab = Window:CreateTab("Protection", true)
+local BotTab = Window:CreateTab("Bot", true)
+local VisualsTab = Window:CreateTab("Visuals", true)
+
 local LeftBlockCombat = MainTab:CreateBlock({
     Name = "Combat Modules", 
     Side = "Left"
@@ -1442,15 +1580,6 @@ LeftBlockCombat:CreateToggle({
                 Duration = 2
             })
         end
-    end
-})
-
-LeftBlockCombat:CreateKeybind({
-    Name = "Custom Dash [BETA]", 
-    Default = Enum.KeyCode.E, 
-    Flag = "CustomDashBetaKeybind", 
-    Callback = function() 
-        PerformCustomDash() 
     end
 })
 
@@ -1544,6 +1673,110 @@ LeftBlockMovement:CreateSlider({
             if hum then
                 hum.WalkSpeed = customWalkSpeed
             end
+        end
+    end
+})
+
+local ProtMainBlock = ProtectionTab:CreateBlock({
+    Name = "Phantom Evade Modules", 
+    Side = "Left"
+})
+
+local ProtConfigBlock = ProtectionTab:CreateBlock({
+    Name = "Box & Physics Tuning", 
+    Side = "Right"
+})
+
+local PhantomToggle = ProtMainBlock:CreateToggle({
+    Name = "Phantom Evade [BETA]", 
+    Default = false, 
+    Flag = "PhantomEvadeToggle", 
+    Callback = function(State) 
+        SetPhantomEvade(State)
+    end
+})
+
+ProtMainBlock:CreateKeybind({
+    Name = "Phantom Evade Bind", 
+    Default = Enum.KeyCode.Z, 
+    Flag = "PhantomEvadeKeybind", 
+    Callback = function() 
+        if PhantomToggle then
+            PhantomToggle:Set(not autoDodgeEnabled)
+        end
+    end
+})
+
+ProtMainBlock:CreateToggle({
+    Name = "Show Evade Box", 
+    Default = false, 
+    Flag = "ShowEvadeBoxToggle", 
+    Callback = function(State) 
+        dodgeBoxVisible = State
+        if dodgeBoxPart then
+            if State and autoDodgeEnabled then
+                dodgeBoxPart.Transparency = 0.82
+                if dodgeBoxSelection then dodgeBoxSelection.Visible = true end
+            else
+                dodgeBoxPart.Transparency = 1
+                if dodgeBoxSelection then dodgeBoxSelection.Visible = false end
+            end
+        end
+    end
+})
+
+ProtConfigBlock:CreateSlider({
+    Name = "Evade Speed", 
+    Min = 100, 
+    Max = 10000, 
+    Default = 500, 
+    Flag = "EvadeSpeedSlider", 
+    Callback = function(Value) 
+        dodgeSpeed = Value
+        if dodgeVel.Magnitude > 0.1 then
+            dodgeVel = dodgeVel.Unit * dodgeSpeed
+        end
+    end
+})
+
+ProtConfigBlock:CreateSlider({
+    Name = "Box Width (X)", 
+    Min = 5, 
+    Max = 150, 
+    Default = 30, 
+    Flag = "BoxWidthSlider", 
+    Callback = function(Value) 
+        dodgeBoxWidth = Value
+        if dodgeBoxPart then
+            dodgeBoxPart.Size = Vector3.new(dodgeBoxWidth, dodgeBoxHeight, dodgeBoxThickness)
+        end
+    end
+})
+
+ProtConfigBlock:CreateSlider({
+    Name = "Box Height (Y)", 
+    Min = 10, 
+    Max = 200, 
+    Default = 60, 
+    Flag = "BoxHeightSlider", 
+    Callback = function(Value) 
+        dodgeBoxHeight = Value
+        if dodgeBoxPart then
+            dodgeBoxPart.Size = Vector3.new(dodgeBoxWidth, dodgeBoxHeight, dodgeBoxThickness)
+        end
+    end
+})
+
+ProtConfigBlock:CreateSlider({
+    Name = "Box Thickness (Z)", 
+    Min = 5, 
+    Max = 150, 
+    Default = 20, 
+    Flag = "BoxThicknessSlider", 
+    Callback = function(Value) 
+        dodgeBoxThickness = Value
+        if dodgeBoxPart then
+            dodgeBoxPart.Size = Vector3.new(dodgeBoxWidth, dodgeBoxHeight, dodgeBoxThickness)
         end
     end
 })
@@ -1732,8 +1965,7 @@ EmergencyDistSlider = RightBlockPhysics:CreateSlider({
     end
 })
 
-local BotTab = Window:CreateTab("Bot", true)
-local BotMainBlock = BotTab:CreateBlock({
+BotMainBlock = BotTab:CreateBlock({
     Name = "Bot Settings", 
     Side = "Left"
 })
@@ -1787,8 +2019,6 @@ BotMainBlock:CreateToggle({
         end
     end
 })
-
-local VisualsTab = Window:CreateTab("Visuals", true)
 
 local VisualsCamera = VisualsTab:CreateBlock({
     Name = "Camera & ESP", 
