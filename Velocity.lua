@@ -8,9 +8,8 @@ local TweenService = game:GetService("TweenService")
 local Camera = workspace.CurrentCamera
 local Player = Players.LocalPlayer
 
-local customPingMs = 60
-local currentRealPing = (customPingMs + 10) / 1000
-local GLOBAL_PARRY_COOLDOWN = 0
+local currentRealPing = 0.070
+local GLOBAL_PARRY_COOLDOWN = 0.06
 local CLASH_DISTANCE = 18.0
 local CURVE_DOT_THRESHOLD = -0.15
 local SLOW_BALL_RADIUS = 22.0
@@ -41,6 +40,9 @@ local id_timeHoleLock = false
 local autoAbilitiesEnabled = false
 local lastAbilityTime = 0
 
+local lastDashTime = 0
+local isDashing = false
+
 local autoDodgeEnabled = false
 local dodgeBoxVisible = false
 local dodgeOrigin = Vector3.zero
@@ -50,6 +52,10 @@ local dodgeSpeed = 500
 local dodgeBoxWidth = 30
 local dodgeBoxHeight = 60
 local dodgeBoxThickness = 20
+local dodgeAngle = 0
+local dodgePitch = 0
+local dodgeWobble = 0
+local lastDodgePos = Vector3.zero
 local dodgeBoxPart = nil
 local dodgeBoxSelection = nil
 
@@ -134,7 +140,6 @@ end
 
 local function GetOrCreateDodgeBox()
     if dodgeBoxPart and dodgeBoxPart.Parent then
-        dodgeBoxPart.Size = Vector3.new(dodgeBoxWidth, dodgeBoxHeight, dodgeBoxThickness)
         return dodgeBoxPart
     end
     local part = Instance.new("Part")
@@ -422,6 +427,53 @@ local function ToggleFly()
     end
 end
 
+local function PerformCustomDash()
+    local now = os.clock()
+    if isDashing or (now - lastDashTime) < 0.35 then 
+        return 
+    end
+
+    local char = Player.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    
+    if not (char and hum and hrp and hum.Health > 0) then 
+        return 
+    end
+
+    local moveDir = hum.MoveDirection
+    local dashDir
+
+    if moveDir.Magnitude > 0.05 then
+        dashDir = Vector3.new(moveDir.X, 0, moveDir.Z).Unit
+    else
+        local flatLook = Vector3.new(hrp.CFrame.LookVector.X, 0, hrp.CFrame.LookVector.Z)
+        if flatLook.Magnitude > 0.05 then
+            dashDir = flatLook.Unit
+        else
+            dashDir = hrp.CFrame.LookVector
+        end
+    end
+
+    isDashing = true
+    lastDashTime = now
+
+    local bv = Instance.new("BodyVelocity")
+    bv.Name = "Velocity_BypassDash"
+    bv.MaxForce = Vector3.new(2000000, 0, 2000000)
+    bv.Velocity = dashDir * 280
+    bv.Parent = hrp
+
+    hrp.AssemblyLinearVelocity = Vector3.new(dashDir.X * 280, hrp.AssemblyLinearVelocity.Y, dashDir.Z * 280)
+
+    task.delay(0.18, function()
+        pcall(function()
+            bv:Destroy()
+        end)
+        isDashing = false
+    end)
+end
+
 local function SetPhantomEvade(state)
     local char = Player.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
@@ -432,12 +484,17 @@ local function SetPhantomEvade(state)
         dodgeOrigin = hrp.Position
         dodgeCamAnchor.CFrame = CFrame.new(dodgeOrigin)
         Camera.CameraSubject = dodgeCamAnchor
+        dodgeAngle = math.random() * math.pi * 2
+        dodgePitch = math.random() * math.pi * 2
+        dodgeWobble = math.random() * math.pi * 2
+        lastDodgePos = Vector3.zero
         dodgeLocalPos = Vector3.zero
-        local vx = (math.random(60, 100) / 100) * (math.random() > 0.5 and 1 or -1)
-        local vy = (math.random(60, 100) / 100) * (math.random() > 0.5 and 1 or -1)
-        local vz = (math.random(60, 100) / 100) * (math.random() > 0.5 and 1 or -1)
-        dodgeVel = Vector3.new(vx, vy, vz).Unit * dodgeSpeed
         autoDodgeEnabled = true
+        if dodgeBoxVisible then
+            local box = GetOrCreateDodgeBox()
+            box.Transparency = 0.82
+            if dodgeBoxSelection then dodgeBoxSelection.Visible = true end
+        end
     else
         autoDodgeEnabled = false
         if hum then
@@ -448,6 +505,10 @@ local function SetPhantomEvade(state)
             if dodgeOrigin ~= Vector3.zero then
                 hrp.CFrame = CFrame.new(dodgeOrigin.X, hrp.Position.Y, dodgeOrigin.Z) * hrp.CFrame.Rotation
             end
+        end
+        if dodgeBoxPart then
+            dodgeBoxPart.Transparency = 1
+            if dodgeBoxSelection then dodgeBoxSelection.Visible = false end
         end
     end
     if isScriptLoaded then
@@ -474,9 +535,11 @@ end)
 task.spawn(function()
     while true do
         if isScriptLoaded then
-            currentRealPing = (customPingMs + 10) / 1000
+            pcall(function()
+                currentRealPing = Player:GetNetworkPing() + 0.035
+            end)
         end
-        task.wait(0.5)
+        task.wait(1)
     end
 end)
 
@@ -507,64 +570,21 @@ RunService.Heartbeat:Connect(function(dt)
             Camera.CameraSubject = dodgeCamAnchor
         end
 
-        dodgeLocalPos = dodgeLocalPos + (dodgeVel * dt)
+        local stepRate = dt * (dodgeSpeed / 14)
+        dodgeAngle = (dodgeAngle + stepRate) % (math.pi * 200)
+        dodgePitch = (dodgePitch + stepRate * 1.41) % (math.pi * 200)
+        dodgeWobble = (dodgeWobble + stepRate * 0.73) % (math.pi * 200)
 
         local halfW = dodgeBoxWidth / 2
         local halfH = dodgeBoxHeight / 2
         local halfT = dodgeBoxThickness / 2
 
-        local minX, maxX = -halfW, halfW
-        local minY, maxY = -halfH, halfH
-        local minZ, maxZ = -halfT, halfT
+        local rScale = 0.82 + (0.18 * math.cos(dodgeWobble))
+        local targetX = math.cos(dodgeAngle) * (halfW * rScale)
+        local targetZ = math.sin(dodgeAngle * 1.33) * (halfT * rScale)
+        local targetY = math.sin(dodgePitch) * halfH
 
-        local deadzoneRadius = math.min(halfW, halfT) * 0.65
-        local horizDist = math.sqrt(dodgeLocalPos.X^2 + dodgeLocalPos.Z^2)
-
-        if horizDist < deadzoneRadius then
-            local nx = horizDist > 0.01 and (dodgeLocalPos.X / horizDist) or (math.random() > 0.5 and 1 or -1)
-            local nz = horizDist > 0.01 and (dodgeLocalPos.Z / horizDist) or (math.random() > 0.5 and 1 or -1)
-            dodgeLocalPos = Vector3.new(nx * deadzoneRadius, dodgeLocalPos.Y, nz * deadzoneRadius)
-
-            local side = (math.random() > 0.5 and 1 or -1)
-            local tx = -nz * side
-            local tz = nx * side
-            local outDir = Vector3.new(nx * 0.3 + tx * 0.9, (math.random(-60, 60) / 100), nz * 0.3 + tz * 0.9)
-            if outDir.Magnitude > 0.01 then
-                dodgeVel = outDir.Unit * dodgeSpeed
-            end
-        end
-
-        if dodgeLocalPos.X >= maxX then
-            dodgeLocalPos = Vector3.new(maxX, dodgeLocalPos.Y, dodgeLocalPos.Z)
-            local randY = math.random(-80, 80) / 100
-            local randZ = (math.random() > 0.5 and 1 or -1) * (math.random(40, 100) / 100)
-            dodgeVel = Vector3.new(-math.abs(dodgeVel.X), randY * dodgeSpeed, randZ * dodgeSpeed).Unit * dodgeSpeed
-        elseif dodgeLocalPos.X <= minX then
-            dodgeLocalPos = Vector3.new(minX, dodgeLocalPos.Y, dodgeLocalPos.Z)
-            local randY = math.random(-80, 80) / 100
-            local randZ = (math.random() > 0.5 and 1 or -1) * (math.random(40, 100) / 100)
-            dodgeVel = Vector3.new(math.abs(dodgeVel.X), randY * dodgeSpeed, randZ * dodgeSpeed).Unit * dodgeSpeed
-        end
-
-        if dodgeLocalPos.Y >= maxY then
-            dodgeLocalPos = Vector3.new(dodgeLocalPos.X, maxY, dodgeLocalPos.Z)
-            dodgeVel = Vector3.new(dodgeVel.X, -math.abs(dodgeVel.Y), dodgeVel.Z)
-        elseif dodgeLocalPos.Y <= minY then
-            dodgeLocalPos = Vector3.new(dodgeLocalPos.X, minY, dodgeLocalPos.Z)
-            dodgeVel = Vector3.new(dodgeVel.X, math.abs(dodgeVel.Y), dodgeVel.Z)
-        end
-
-        if dodgeLocalPos.Z >= maxZ then
-            dodgeLocalPos = Vector3.new(dodgeLocalPos.X, dodgeLocalPos.Y, maxZ)
-            local randY = math.random(-80, 80) / 100
-            local randX = (math.random() > 0.5 and 1 or -1) * (math.random(40, 100) / 100)
-            dodgeVel = Vector3.new(randX * dodgeSpeed, randY * dodgeSpeed, -math.abs(dodgeVel.Z)).Unit * dodgeSpeed
-        elseif dodgeLocalPos.Z <= minZ then
-            dodgeLocalPos = Vector3.new(dodgeLocalPos.X, dodgeLocalPos.Y, minZ)
-            local randY = math.random(-80, 80) / 100
-            local randX = (math.random() > 0.5 and 1 or -1) * (math.random(40, 100) / 100)
-            dodgeVel = Vector3.new(randX * dodgeSpeed, randY * dodgeSpeed, math.abs(dodgeVel.Z)).Unit * dodgeSpeed
-        end
+        dodgeLocalPos = Vector3.new(targetX, targetY, targetZ)
 
         local rot = hrp.CFrame.Rotation
         local cam = workspace.CurrentCamera
@@ -575,31 +595,19 @@ RunService.Heartbeat:Connect(function(dt)
         end
 
         hrp.CFrame = CFrame.new(dodgeOrigin + dodgeLocalPos) * rot
+
+        if dt > 0.001 then
+            dodgeVel = (dodgeLocalPos - lastDodgePos) / dt
+        end
+        lastDodgePos = dodgeLocalPos
         hrp.AssemblyLinearVelocity = dodgeVel
 
-        local box = GetOrCreateDodgeBox()
-        box.Size = Vector3.new(dodgeBoxWidth, dodgeBoxHeight, dodgeBoxThickness)
-        box.CFrame = CFrame.new(dodgeOrigin)
-        if dodgeBoxVisible then
-            box.Transparency = 0.82
-            if dodgeBoxSelection then
-                dodgeBoxSelection.Visible = true
-            end
-        else
-            box.Transparency = 1
-            if dodgeBoxSelection then
-                dodgeBoxSelection.Visible = false
-            end
+        if dodgeBoxVisible and dodgeBoxPart then
+            dodgeBoxPart.CFrame = CFrame.new(dodgeOrigin)
         end
     else
         if Camera.CameraSubject == dodgeCamAnchor and hum then
             Camera.CameraSubject = hum
-        end
-        if dodgeBoxPart then
-            dodgeBoxPart.Transparency = 1
-            if dodgeBoxSelection then
-                dodgeBoxSelection.Visible = false
-            end
         end
     end
 end)
@@ -833,15 +841,25 @@ end)
 local function IsAbilityOnCooldown()
     local pGui = Player:FindFirstChild("PlayerGui")
     if not pGui then return false end
-    for _, desc in ipairs(pGui:GetDescendants()) do
-        if desc:IsA("GuiObject") and (desc.Name:lower():find("ability") or desc.Name:lower():find("skill")) then
-            local cdText = desc:FindFirstChild("Cooldown", true) or desc:FindFirstChild("Timer", true)
-            if cdText and cdText:IsA("TextLabel") and cdText.Visible and cdText.Text ~= "" and cdText.Text ~= "0" then
-                return true
-            end
-            local cdFrame = desc:FindFirstChild("CooldownFrame", true)
-            if cdFrame and cdFrame:IsA("GuiObject") and cdFrame.Visible and cdFrame.Size.Y.Scale > 0.05 then
-                return true
+    
+    local hotbar = pGui:FindFirstChild("Hotbar")
+    local abilityBtn = hotbar and (hotbar:FindFirstChild("Ability") or hotbar:FindFirstChild("Skill"))
+    if abilityBtn then
+        local cdText = abilityBtn:FindFirstChild("Cooldown", true) or abilityBtn:FindFirstChild("Timer", true)
+        if cdText and cdText:IsA("TextLabel") and cdText.Visible and cdText.Text ~= "" and cdText.Text ~= "0" then
+            return true
+        end
+        local cdFrame = abilityBtn:FindFirstChild("CooldownFrame", true)
+        if cdFrame and cdFrame:IsA("GuiObject") and cdFrame.Visible and cdFrame.Size.Y.Scale > 0.05 then
+            return true
+        end
+    else
+        for _, desc in ipairs(pGui:GetDescendants()) do
+            if desc:IsA("GuiObject") and (desc.Name:lower() == "ability" or desc.Name:lower() == "skill") then
+                local cdText = desc:FindFirstChild("Cooldown", true) or desc:FindFirstChild("Timer", true)
+                if cdText and cdText:IsA("TextLabel") and cdText.Visible and cdText.Text ~= "" and cdText.Text ~= "0" then
+                    return true
+                end
             end
         end
     end
@@ -850,7 +868,8 @@ end
 
 local function TriggerAbilityDefend()
     local now = os.clock()
-    if (now - lastAbilityTime) < 7.0 then return end
+    if (now - lastAbilityTime) < 1.5 then return end
+    if IsAbilityOnCooldown() then return end
     lastAbilityTime = now
     
     task.defer(function()
@@ -1269,9 +1288,6 @@ local function ProcessSmartParry(ball, hrp, now)
     end
     
     if shouldParry then
-        if (now - lastParryTime) < 0.06 and not autoClashActive then 
-            return 
-        end
         parriedBalls[ball] = true
         lastParryTime = now
         RegisterParryAttempt(now)
@@ -1380,9 +1396,6 @@ local function ProcessIdenticalParry(ball, hrp, now)
     end
 
     if shouldParry then
-        if (now - lastParryTime) < 0.06 and not autoClashActive then 
-            return 
-        end
         parriedBalls[ball] = true
         lastParryTime = now
         RegisterParryAttempt(now)
@@ -1450,9 +1463,6 @@ local function ProcessUltraLowLatency(ball, hrp, now)
     end
 
     if shouldParry then
-        if (now - lastParryTime) < 0.06 and not autoClashActive then 
-            return 
-        end
         parriedBalls[ball] = true
         lastParryTime = now
         RegisterParryAttempt(now)
@@ -1488,6 +1498,15 @@ local function ProcessAutoParry()
         return 
     end
     
+    local dist = (hrp.Position - ball.Position).Magnitude
+    local minCd = GLOBAL_PARRY_COOLDOWN
+    if dist <= CLASH_DISTANCE then
+        minCd = math.min(0.015, GLOBAL_PARRY_COOLDOWN)
+    end
+    
+    if (now - lastParryTime) < minCd then 
+        return 
+    end
     if parriedBalls[ball] then 
         return 
     end
@@ -1605,6 +1624,15 @@ LeftBlockCombat:CreateToggle({
                 Duration = 2
             })
         end
+    end
+})
+
+LeftBlockCombat:CreateKeybind({
+    Name = "Custom Dash", 
+    Default = Enum.KeyCode.E, 
+    Flag = "CustomDashKeybind", 
+    Callback = function() 
+        PerformCustomDash() 
     end
 })
 
@@ -1738,14 +1766,13 @@ ProtMainBlock:CreateToggle({
     Flag = "ShowEvadeBoxToggle", 
     Callback = function(State) 
         dodgeBoxVisible = State
-        if dodgeBoxPart then
-            if State and autoDodgeEnabled then
-                dodgeBoxPart.Transparency = 0.82
-                if dodgeBoxSelection then dodgeBoxSelection.Visible = true end
-            else
-                dodgeBoxPart.Transparency = 1
-                if dodgeBoxSelection then dodgeBoxSelection.Visible = false end
-            end
+        local box = GetOrCreateDodgeBox()
+        if State and autoDodgeEnabled then
+            box.Transparency = 0.82
+            if dodgeBoxSelection then dodgeBoxSelection.Visible = true end
+        else
+            box.Transparency = 1
+            if dodgeBoxSelection then dodgeBoxSelection.Visible = false end
         end
     end
 })
@@ -1758,9 +1785,6 @@ ProtConfigBlock:CreateSlider({
     Flag = "EvadeSpeedSlider", 
     Callback = function(Value) 
         dodgeSpeed = Value
-        if dodgeVel.Magnitude > 0.1 then
-            dodgeVel = dodgeVel.Unit * dodgeSpeed
-        end
     end
 })
 
@@ -1806,6 +1830,7 @@ ProtConfigBlock:CreateSlider({
     end
 })
 
+local GlobalCdSlider
 local ClashDistSlider
 local CurveSlider
 local SlowRadiusSlider
@@ -1815,6 +1840,7 @@ local EmergencyDistSlider
 
 local Presets = {
     ["Competitive (Balanced)"] = {
+        GlobalCD = 0.06,
         ClashDist = 18.0, 
         Curve = -0.15, 
         SlowRadius = 22.0, 
@@ -1823,6 +1849,7 @@ local Presets = {
         EmergencyDist = 10.0
     },
     ["Maximum Stability (Safe)"] = {
+        GlobalCD = 0.09,
         ClashDist = 16.0, 
         Curve = -0.20, 
         SlowRadius = 25.0, 
@@ -1831,6 +1858,7 @@ local Presets = {
         EmergencyDist = 11.0
     },
     ["High Speed / Snipes"] = {
+        GlobalCD = 0.05,
         ClashDist = 20.0, 
         Curve = -0.10, 
         SlowRadius = 24.0, 
@@ -1839,6 +1867,7 @@ local Presets = {
         EmergencyDist = 8.0
     },
     ["Clash Duelist"] = {
+        GlobalCD = 0.035,
         ClashDist = 22.0, 
         Curve = 0.00, 
         SlowRadius = 18.0, 
@@ -1847,6 +1876,7 @@ local Presets = {
         EmergencyDist = 9.0
     },
     ["Anti-Curve Defense"] = {
+        GlobalCD = 0.08,
         ClashDist = 17.0, 
         Curve = -0.25, 
         SlowRadius = 26.0, 
@@ -1870,7 +1900,7 @@ RightBlockCore:CreateDropdown({
     Callback = function(Selected)
         local cfg = Presets[Selected]
         if cfg then
-            GLOBAL_PARRY_COOLDOWN = 0
+            GLOBAL_PARRY_COOLDOWN = cfg.GlobalCD
             CLASH_DISTANCE = cfg.ClashDist
             CURVE_DOT_THRESHOLD = cfg.Curve
             SLOW_BALL_RADIUS = cfg.SlowRadius
@@ -1878,6 +1908,11 @@ RightBlockCore:CreateDropdown({
             HIGH_SPEED_THRESHOLD = cfg.HighSpeed
             EMERGENCY_DISTANCE = cfg.EmergencyDist
             
+            if GlobalCdSlider then
+                pcall(function()
+                    GlobalCdSlider:Set(cfg.GlobalCD)
+                end)
+            end
             if ClashDistSlider then 
                 pcall(function() 
                     ClashDistSlider:Set(cfg.ClashDist) 
@@ -1912,15 +1947,14 @@ RightBlockCore:CreateDropdown({
     end
 })
 
-RightBlockCore:CreateSlider({
-    Name = "Custom Ping (ms)", 
-    Min = 0, 
-    Max = 350, 
-    Default = 60, 
-    Flag = "CustomPingSlider", 
+GlobalCdSlider = RightBlockCore:CreateSlider({
+    Name = "Global Parry Cooldown", 
+    Min = 0.00, 
+    Max = 0.40, 
+    Default = 0.06, 
+    Flag = "GlobalCooldown", 
     Callback = function(Value) 
-        customPingMs = math.floor(Value)
-        currentRealPing = (customPingMs + 10) / 1000
+        GLOBAL_PARRY_COOLDOWN = Value 
     end
 })
 
@@ -2035,12 +2069,20 @@ BotMainBlock:CreateToggle({
     Flag = "BotAutoAdaptToggle",
     Callback = function(State)
         botAutoAdaptEnabled = State
-        if State and isScriptLoaded then 
-            Library:Notify({
-                Title = "Velocity", 
-                Content = "Auto-Adapt ON: Parameters will shift dynamically!", 
-                Duration = 2.5
-            }) 
+        if State then
+            GLOBAL_PARRY_COOLDOWN = 0.02
+            if GlobalCdSlider then 
+                pcall(function() 
+                    GlobalCdSlider:Set(0.02) 
+                end) 
+            end
+            if isScriptLoaded then 
+                Library:Notify({
+                    Title = "Velocity", 
+                    Content = "Auto-Adapt ON: Parameters will shift dynamically!", 
+                    Duration = 2.5
+                }) 
+            end
         end
     end
 })
