@@ -1,3201 +1,3 @@
-local __axiomGlassFactories = {}
-local __axiomGlassCache = {}
-local function __axiomGlassRequire(name)
-    local cached = __axiomGlassCache[name]
-    if cached ~= nil then
-        return cached
-    end
-    local factory = __axiomGlassFactories[name]
-    if not factory then
-        error("Unknown internal glass module: " .. tostring(name), 2)
-    end
-    local exported = factory()
-    if exported == nil then
-        error("Internal glass module returned nil: " .. tostring(name), 2)
-    end
-    __axiomGlassCache[name] = exported
-    return exported
-end
-
-__axiomGlassFactories['Config'] = function()
-
-
-local Config = {}
-
-Config.TAG_NAME = "GlassmorphicUI"
-
-Config.SAMPLING_CELL_SIZE = 11
-Config.SAMPLE_TIME_BUDGET = 2.5e-3
-Config.LIQUID_TIME_BUDGET = 3.5e-3
-Config.TEMPORAL_SMOOTHING = 0.6
-Config.RESIZE_DEBOUNCE = 1 / 25
-Config.RESIZE_MAX_WAIT = 1 / 10 -- layout interval for never-settling tweens
-Config.MIN_OUTPUT_RESOLUTION = 32 -- floor of the step-down ladder
-Config.EDGE_DENSITY_BOOST = 3 -- edge density multiplier; refracted fetches concentrate there
-Config.DEBUG_SAMPLING_HEATMAP = false -- render sampler density instead of glass
-
-Config.DEBUG_OVERLAY = nil :: string? -- "sdf-contours" | "melt-contours" | "normals" | "cell-centers" | "cell-centers-uniform" | "grid-view" | "grid-view-flat"
-Config.DEBUG_RAW_DISTANCE_FIELD = false -- use raw distance field depth and normal
-Config.DEBUG_FROST_NO_PREMULTIPLY = false -- frost without coverage premultiply, showing tint bleed
-Config.DEBUG_UNIFORM_WARP = false -- flat density warp to show rim smears demand warp removes
-Config.DEBUG_BILINEAR_FETCH = false -- bilinear grid fetch to show cell lattice (set ChromaticAberration 0)
-Config.DEBUG_FROST_NEAREST_LEVEL = false -- single blur call to show plateaus and pops
-
-Config.PARALLEL_ENABLED = false
-Config.PARALLEL_WORKER_COUNT = 8
-Config.PARALLEL_MIN_OUTPUT_PIXELS = 72 * 72 -- message copies cost more than pass below this
-Config.PARALLEL_CHUNK_PIXELS = 64 * 1024 -- output px per worker per frame
-Config.PARALLEL_TIMEOUT_FRAMES = 300 -- ~5s before in-flight pass counts as lost
-Config.PARALLEL_RESIZE_SETTLE = 0.25 -- relayout settle time before passes scatter again
-Config.FROST_WORKER_COUNT = 3 -- EditableImageBlur.BlurAsync workers for the parallel route's frost
-
-Config.DEFAULT_CORNER_RADIUS = UDim.new(0.4, 0) -- used when no UICorner or attribute supplies a radius
-Config.DEFAULT_SUPER_ELLIPSE_FACTOR = 3 -- corner exponent; 2 is a circle, higher is squarer
-Config.DEFAULT_THICKNESS = UDim.new(0.15, 0) -- depth of the refracting band
-Config.DEFAULT_REFRACTION_FACTOR = 2.1
-Config.DEFAULT_CHROMATIC_ABERRATION = 0.2 -- per-channel displacement spread; red fetches this fraction farther, blue this fraction shorter
-Config.DEFAULT_FRESNEL_SIZE = UDim.new(0.1, 0)
-Config.DEFAULT_FRESNEL_HARDNESS = 40
-Config.DEFAULT_FRESNEL_INTENSITY = 25
-Config.DEFAULT_GLARE_SIZE = UDim.new(0.2, 0)
-Config.DEFAULT_GLARE_HARDNESS = 40
-Config.DEFAULT_GLARE_INTENSITY = 70
-Config.DEFAULT_GLARE_CONVERGENCE = 90
-Config.DEFAULT_GLARE_OPPOSITE_SIDE = 50
-Config.DEFAULT_GLARE_ANGLE = -50 -- degrees
-Config.DEFAULT_BLUR_RADIUS = UDim.new(0.06, 0) -- the gaussian sigma is a third of the resolved px
-Config.DEFAULT_MAX_OUTPUT_RESOLUTION = 192 -- max axis of the output image
-
-Config.MIN_BLUR_SIGMA = 0.1
-
-Config.BLUR_RADIUS_ATTRIBUTE_NAME = "BlurRadius"
-Config.TRANSPARENCY_ATTRIBUTE_NAME = "Transparency"
-
-Config.LIQUID_PARAM_ATTRIBUTES = {
-	"CornerRadius",
-	"SuperEllipseFactor",
-	"Thickness",
-	"RefractionFactor",
-	"ChromaticAberration",
-	"FresnelSize",
-	"FresnelHardness",
-	"FresnelIntensity",
-	"GlareSize",
-	"GlareHardness",
-	"GlareIntensity",
-	"GlareConvergence",
-	"GlareOppositeSide",
-	"GlareAngle",
-	"MaxOutputResolution",
-}
-
-return Config
-end
-
-__axiomGlassFactories['EditableImageBlur'] = function()
-local Blur = {}
-function Blur.Blur(options)
-    local pixels = options.pixelBuffer
-    local w, h = math.floor(options.width), math.floor(options.height)
-    if w < 1 or h < 1 then return end
-    local radius = math.clamp(math.floor((options.blurRadius or 0) * 1.25 + 0.5), 0, 20)
-    if radius == 0 then return end
-    local temp = buffer.create(w * h * 4)
-    local diameter = radius * 2 + 1
-    local skipAlpha = options.skipAlpha == true
-    for y = 0, h-1 do
-        local row = y*w*4
-        for c = 0, 3 do
-            local total = 0
-            for dx = -radius, radius do
-                total += buffer.readu8(pixels, row + math.clamp(dx, 0, w-1)*4 + c)
-            end
-            for x = 0, w-1 do
-                local offset = row+x*4+c
-                buffer.writeu8(temp, offset, math.clamp(math.floor(total / diameter + 0.5), 0, 255))
-                local outgoing = math.clamp(x-radius, 0, w-1)
-                local incoming = math.clamp(x+radius+1, 0, w-1)
-                total += buffer.readu8(pixels, row+incoming*4+c) - buffer.readu8(pixels, row+outgoing*4+c)
-            end
-        end
-    end
-    for x = 0, w-1 do
-        for c = 0, 3 do
-            if not (skipAlpha and c == 3) then
-                local total = 0
-                for dy=-radius, radius do
-                    total += buffer.readu8(temp, (math.clamp(dy, 0, h-1)*w+x)*4+c)
-                end
-                for y=0, h-1 do
-                    local index = (y*w+x)*4+c
-                    buffer.writeu8(pixels, index, math.clamp(math.floor(total / diameter + 0.5),0,255))
-                    local outgoing = math.clamp(y-radius, 0, h-1)
-                    local incoming = math.clamp(y+radius+1, 0, h-1)
-                    total += buffer.readu8(temp,(incoming*w+x)*4+c) - buffer.readu8(temp,(outgoing*w+x)*4+c)
-                end
-            end
-        end
-    end
-end
-function Blur.BlurAsync(options)
-    Blur.Blur(options)
-end
-return Blur
-end
-
-__axiomGlassFactories['PixelColorApproximation'] = function()
-local Players = game:GetService("Players")
-local Lighting = game:GetService("Lighting")
-local Workspace = game:GetService("Workspace")
-local Sampler = {}
-local lastRefresh = -100
-local candidates = {}
-local params = RaycastParams.new()
-params.FilterType = Enum.RaycastFilterType.Exclude
-params.IgnoreWater = false
-local lastCharacter = nil
-local function refresh()
-    if os.clock() - lastRefresh < 0.6 then return end
-    lastRefresh = os.clock()
-    table.clear(candidates)
-    local player = Players.LocalPlayer
-    local playerGui = player and player:FindFirstChildOfClass("PlayerGui")
-    if not playerGui then return end
-    for _, obj in ipairs(playerGui:GetDescendants()) do
-        if obj:IsA("GuiObject") and obj.Visible and obj.BackgroundTransparency < 1 then
-            local screen = obj:FindFirstAncestorOfClass("ScreenGui")
-            if screen and screen.Enabled then
-                table.insert(candidates, {Object = obj, Screen = screen, DisplayOrder = screen.DisplayOrder, ZIndex = obj.ZIndex})
-            end
-        end
-    end
-    table.sort(candidates, function(a, b)
-        if a.DisplayOrder ~= b.DisplayOrder then return a.DisplayOrder < b.DisplayOrder end
-        return a.ZIndex < b.ZIndex
-    end)
-end
-local function sceneColor(x, y)
-    local camera = Workspace.CurrentCamera
-    local sky = Lighting.FogColor
-    local ambient = Lighting.OutdoorAmbient
-    if not camera then return math.max(0.02, sky.R), math.max(0.02, sky.G), math.max(0.02, sky.B) end
-    local viewport = camera.ViewportSize
-    local ray = camera:ViewportPointToRay(math.clamp(x, 0, viewport.X), math.clamp(y, 0, viewport.Y), 0)
-    local player = Players.LocalPlayer
-    local character = player and player.Character
-    if lastCharacter ~= character then
-        lastCharacter = character
-        params.FilterDescendantsInstances = character and {character} or {}
-    end
-    local hit = Workspace:Raycast(ray.Origin, ray.Direction * 900, params)
-    if not hit then
-        local gradient = math.clamp(0.5 + ray.Direction.Y * 0.5, 0, 1)
-        local atmosphere = Lighting:FindFirstChildOfClass("Atmosphere")
-        local c = sky
-        if atmosphere then
-            c = sky:Lerp(atmosphere.Color, 0.28 + 0.3 * gradient)
-        else
-            c = sky:Lerp(ambient, 0.15 + gradient * 0.25)
-        end
-        return c.R, c.G, c.B
-    end
-    local color
-    if hit.Instance:IsA("BasePart") then
-        color = hit.Instance.Color
-    elseif hit.Instance:IsA("Terrain") then
-        local success, terrainColor = pcall(function() return hit.Instance:GetMaterialColor(hit.Material) end)
-        color = success and terrainColor or Color3.fromRGB(116, 134, 108)
-    else
-        color = sky
-    end
-    local sunDirection = Lighting:GetSunDirection()
-    local light = math.max(0, hit.Normal:Dot(sunDirection))
-    local exposure = math.clamp(0.34 + light * 0.53 + Lighting.Brightness * 0.055, 0.2, 1.25)
-    local r = math.clamp(color.R * exposure + ambient.R * 0.18, 0, 1)
-    local g = math.clamp(color.G * exposure + ambient.G * 0.18, 0, 1)
-    local b = math.clamp(color.B * exposure + ambient.B * 0.18, 0, 1)
-    if hit.Material == Enum.Material.Neon then
-        r, g, b = color.R, color.G, color.B
-    elseif hit.Material == Enum.Material.Glass then
-        r = r * 0.78 + sky.R * 0.22
-        g = g * 0.78 + sky.G * 0.22
-        b = b * 0.78 + sky.B * 0.22
-    end
-    local distance = (hit.Position - ray.Origin).Magnitude
-    local fogEnd = Lighting.FogEnd
-    if fogEnd < 100000 and fogEnd > 0 then
-        local fraction = math.clamp((distance - Lighting.FogStart) / math.max(fogEnd - Lighting.FogStart, 1), 0, 1)
-        r = r * (1 - fraction) + sky.R * fraction
-        g = g * (1 - fraction) + sky.G * fraction
-        b = b * (1 - fraction) + sky.B * fraction
-    end
-    return r, g, b
-end
-function Sampler:GetColorXY(x, y, pane, footprint)
-    local r, g, b = sceneColor(x, y)
-    refresh()
-    local ownScreen = pane and pane:FindFirstAncestorOfClass("ScreenGui")
-    local maxOrder = ownScreen and ownScreen.DisplayOrder or math.huge
-    for _, entry in ipairs(candidates) do
-        local obj = entry.Object
-        if obj.Parent and entry.Screen ~= ownScreen and entry.DisplayOrder <= maxOrder then
-            local pos, size = obj.AbsolutePosition, obj.AbsoluteSize
-            if x >= pos.X and y >= pos.Y and x <= pos.X + size.X and y <= pos.Y + size.Y then
-                local visible = true
-                local ancestor = obj.Parent
-                while ancestor and ancestor:IsA("GuiObject") do
-                    if not ancestor.Visible then visible = false; break end
-                    if ancestor.ClipsDescendants then
-                        local p, z = ancestor.AbsolutePosition, ancestor.AbsoluteSize
-                        if x < p.X or y < p.Y or x > p.X + z.X or y > p.Y + z.Y then visible = false; break end
-                    end
-                    ancestor = ancestor.Parent
-                end
-                if visible then
-                    local c = obj.BackgroundColor3
-                    local alpha = 1 - obj.BackgroundTransparency
-                    r, g, b = r * (1-alpha) + c.R*alpha, g*(1-alpha)+c.G*alpha, b*(1-alpha)+c.B*alpha
-                end
-            end
-        end
-    end
-    return r, g, b
-end
-return Sampler
-end
-
-__axiomGlassFactories['Dependencies'] = function()
-return {
-    EditableImageBlur = __axiomGlassRequire("EditableImageBlur"),
-    PixelColorApproximation = __axiomGlassRequire("PixelColorApproximation"),
-}
-end
-
-__axiomGlassFactories['Liquid.Types'] = function()
-
-
-export type LiquidParams = {
-	cornerRadius: number, -- px
-	superEllipseFactor: number, -- corner exponent; 2 is circle, higher is squarer
-	thickness: number, -- slab depth and refracting band width in px
-	refractionFactor: number, -- refractive index ratio, 1 = no refraction
-	chromaticAberration: number, -- per-channel displacement spread, 0-1, 0 disables
-	fresnelSize: number, -- px reach of the rim fresnel, 0 disables
-	fresnelHardness: number, -- 0-1
-	fresnelIntensity: number, -- 0-1, recon-time not baked
-	glareSize: number, -- px reach of the rim glare, 0 disables
-	glareHardness: number, -- 0-1
-	glareIntensity: number, -- 0-1.2
-	glareConvergence: number, -- 0-1; how tightly the glare hugs its axis
-	glareOppositeSide: number, -- 0-1 strength of the second lobe
-	glareAngle: number, -- radians
-	maxOutputResolution: number, -- max axis of the output EditableImage
-}
-
-export type GeometryEntry = {
-	Key: string,
-	Refs: number,
-	Ready: boolean,
-	WinW: number, -- window px
-	WinH: number,
-	OutW: number, -- output image px
-	OutH: number,
-	StepX: number, -- window px per output px
-	StepY: number,
-	DispMap: buffer, -- interleaved i16 pairs per pixel
-	AuxMap: buffer, -- u8 fresnel, u8 glare, u8 alpha, one unused pad byte per pixel
-	Phase: number, -- 1 = geometry stage 1, 2 = stage 2, 3 = done
-	Row: number, -- next row for the current phase
-	Params: LiquidParams,
-	RawField: boolean, -- debug flag for raw distance field
-}
-
-export type ReconJob = {
-	Out: buffer, -- output RGBA, OutW x OutH
-	Disp: buffer,
-	Aux: buffer,
-	Grid: buffer, -- source grid RGBA, GridW x GridH
-	GridW: number,
-	GridH: number,
-	OutW: number,
-	OutH: number,
-	StepX: number, -- window px per output px
-	StepY: number,
-	WarpX: buffer, -- per-grid-row window-x to grid-column LUTs
-	WarpY: buffer, -- window-y -> grid-row LUT
-	TintR: number, -- 0-1
-	TintG: number,
-	TintB: number,
-	TintAlpha: number, -- 0-1, tint mix weight against backdrop
-	RedScale: number, -- dispersion multiplier; green is 1
-	BlueScale: number,
-	BlurSigma: number, -- frost sigma in output px
-	FresnelIntensity: number, -- rim composite weight
-	RimEnabled: boolean, -- true when rim fresnel or glare enabled
-	BilinearFetch: boolean?, -- debug flag
-	Row: number, -- next row to reconstruct
-	RowEnd: number, -- exclusive end row
-}
-
-return {}
-end
-
-__axiomGlassFactories['Liquid.Refraction'] = function()
-
-
-local Refraction = {}
-
-Refraction.DISP_CONST = 0.05 * math.sqrt(2) * 1000
-
-Refraction.FETCH_ROOM = 0.9
-
-function Refraction.edgeFactorAt(d: number, thickness: number, invRefFactor: number): number
-	if d < 0 or d >= thickness then
-		return 0
-	end
-	local x = 1 - d / thickness
-	local sinI = x * x -- in [0, 1], so the asin calls stay in domain
-	local thetaI = math.asin(sinI)
-	local thetaT = math.asin(sinI * invRefFactor)
-	return math.tan(thetaI - thetaT)
-end
-
-function Refraction.dispersionScales(aberration: number): (number, number)
-	return 1 + aberration, 1 - aberration
-end
-
-return Refraction
-end
-
-__axiomGlassFactories['Liquid.Shape'] = function()
-
-
-local Types = __axiomGlassRequire("Liquid.Types")
-
-type LiquidParams = Types.LiquidParams
-
-local Shape = {}
-
-function Shape.sdfRoundedRect(qx: number, qy: number, radius: number, n: number, invN: number): number
-	if qx > 0 and qy > 0 then
-		return (qx ^ n + qy ^ n) ^ invN - radius
-	end
-	local ddx, ddy = qx - radius, qy - radius
-	local mx = if ddx > 0 then ddx else 0
-	local my = if ddy > 0 then ddy else 0
-	local inner = if ddx > ddy then ddx else ddy
-	return math.sqrt(mx * mx + my * my) + (if inner < 0 then inner else 0)
-end
-
-function Shape.deriveShape(
-	params: LiquidParams,
-	winW: number,
-	winH: number
-): (number, number, number, number, number, number, number)
-	local halfW, halfH = winW / 2, winH / 2
-	local radius = math.min(params.cornerRadius, halfW, halfH)
-	local n = params.superEllipseFactor
-	return halfW, halfH, radius, halfW - radius, halfH - radius, n, 1 / n
-end
-
-return Shape
-end
-
-__axiomGlassFactories['Liquid.Warp'] = function()
-
-
-local Shape = __axiomGlassRequire("Liquid.Shape")
-local Refraction = __axiomGlassRequire("Liquid.Refraction")
-local Types = __axiomGlassRequire("Liquid.Types")
-
-type LiquidParams = Types.LiquidParams
-
-local sdfRoundedRect = Shape.sdfRoundedRect
-local deriveShape = Shape.deriveShape
-local edgeFactorAt = Refraction.edgeFactorAt
-local DISP_CONST = Refraction.DISP_CONST
-local FETCH_ROOM = Refraction.FETCH_ROOM
-
-local WARP_CDF_STEPS = 1024 -- density integration resolution
-local WARP_LUT_SIZE = 512 -- window-position to grid-coord map entries
-local WARP_LUT_MAX = WARP_LUT_SIZE - 1
-local DEMAND_BINS = 128 -- resolution of the depth-demand profile and its field samples
-local DEMAND_SCAN_STEPS = 512 -- depths pushed through the refraction profile
-local WARP_DENSITY_FLOOR = 0.35 -- keeps unread bands warm for blur and warm-start
-
-local Warp = {}
-
-Warp.WARP_LUT_MAX = WARP_LUT_MAX
-
-function Warp.warpKey(
-	gridW: number,
-	gridH: number,
-	winW: number,
-	winH: number,
-	params: LiquidParams,
-	maxDensity: number
-): string
-	return string.format(
-		"%d:%d:%d:%d:%.1f:%.2f:%.2f:%.3f:%.4f:%.2f",
-		gridW,
-		gridH,
-		math.round(winW),
-		math.round(winH),
-		params.cornerRadius,
-		params.superEllipseFactor,
-		params.thickness,
-		params.refractionFactor,
-		params.chromaticAberration,
-		maxDensity
-	)
-end
-
-local function smoothHistogram(demand: { number })
-	for _ = 1, 2 do
-		local prev = demand[1]
-		for b = 1, DEMAND_BINS do
-			local current = demand[b]
-			local following = if b < DEMAND_BINS then demand[b + 1] else current
-			demand[b] = (prev + 2 * current + following) * 0.25
-			prev = current
-		end
-	end
-end
-
-local function sampleDemand(demand: { number }, exactBin: number): number
-	if exactBin < 0 then
-		exactBin = 0
-	elseif exactBin > DEMAND_BINS - 1 then
-		exactBin = DEMAND_BINS - 1
-	end
-	local b0 = exactBin // 1
-	local fraction = exactBin - b0
-	local d0 = demand[b0 + 1]
-	local d1 = demand[math.min(b0 + 2, DEMAND_BINS)]
-	return d0 + (d1 - d0) * fraction
-end
-
-local cdfScratch: { number } = table.create(WARP_CDF_STEPS + 1)
-
-local function buildAxisFromDemand(
-	demand: { number },
-	gridN: number,
-	extent: number,
-	maxDensity: number,
-	positions: buffer,
-	positionsOffset: number,
-	lut: buffer,
-	lutOffset: number
-)
-	smoothHistogram(demand)
-
-	local invBinWidth = DEMAND_BINS / (extent / 2)
-
-	local step = extent / WARP_CDF_STEPS
-	local cdf = cdfScratch
-	local total = 0
-	cdf[1] = 0
-	for i = 1, WARP_CDF_STEPS do
-		local x = (i - 0.5) * step
-		local density = math.clamp(
-			sampleDemand(demand, math.min(x, extent - x) * invBinWidth - 0.5),
-			WARP_DENSITY_FLOOR,
-			maxDensity
-		)
-		total += density * step
-		cdf[i + 1] = total
-	end
-
-	local walkIndex = 1
-	for i = 0, gridN - 1 do
-		local target = (i + 0.5) / gridN * total
-		while walkIndex < WARP_CDF_STEPS and cdf[walkIndex + 1] < target do
-			walkIndex += 1
-		end
-		local c0 = cdf[walkIndex]
-		local c1 = cdf[walkIndex + 1]
-		local fraction = if c1 > c0 then (target - c0) / (c1 - c0) else 0
-		buffer.writef32(positions, positionsOffset + i * 4, (walkIndex - 1 + fraction) * step)
-	end
-
-	local gridScale = gridN / total
-	for j = 0, WARP_LUT_MAX do
-		local exactStep = j / WARP_LUT_MAX * WARP_CDF_STEPS
-		local i0 = math.min(exactStep // 1, WARP_CDF_STEPS - 1)
-		local fraction = exactStep - i0
-		local mass = cdf[i0 + 1] + (cdf[i0 + 2] - cdf[i0 + 1]) * fraction
-		buffer.writef32(lut, lutOffset + j * 4, math.clamp(mass * gridScale - 0.5, 0, gridN - 1))
-	end
-end
-
-function Warp.buildWarp(
-	gridW: number,
-	gridH: number,
-	winW: number,
-	winH: number,
-	params: LiquidParams,
-	maxDensity: number,
-	uniform: boolean?
-): (buffer, buffer, buffer, buffer)
-	local halfW, halfH, radius, insetX, insetY, n, invN = deriveShape(params, winW, winH)
-	local halfMin = math.min(halfW, halfH)
-	local thickness = params.thickness
-	local invRefFactor = 1 / params.refractionFactor
-	local spread = params.chromaticAberration
-
-	local depthBin = halfMin / DEMAND_BINS
-	local invDepthBin = 1 / depthBin
-	local demand = table.create(DEMAND_BINS, if uniform then 1 else 0)
-	if not uniform then
-		local scanStep = halfMin / DEMAND_SCAN_STEPS
-		local weight = scanStep * invDepthBin / 3
-		local maxScale = edgeFactorAt(0, thickness, invRefFactor) * DISP_CONST
-		local roomBase = FETCH_ROOM * halfMin
-		for i = 0, DEMAND_SCAN_STEPS - 1 do
-			local p = (i + 0.5) * scanStep
-			local reach = edgeFactorAt(p, thickness, invRefFactor) * DISP_CONST
-			if maxScale > roomBase then
-				local room = halfMin - p + roomBase
-				if maxScale > room then
-					reach = reach * room / maxScale
-				end
-			end
-			for channel = -1, 1 do
-				local fetch = (p + reach * (1 + channel * spread)) * invDepthBin // 1
-				if fetch < 0 then
-					fetch = 0
-				elseif fetch > DEMAND_BINS - 1 then
-					fetch = DEMAND_BINS - 1
-				end
-				demand[fetch + 1] += weight
-			end
-		end
-		smoothHistogram(demand)
-	end
-
-	local function demandAt(x: number, y: number): number
-		local d = sdfRoundedRect(math.abs(x - halfW) - insetX, math.abs(y - halfH) - insetY, radius, n, invN)
-		return sampleDemand(demand, -d * invDepthBin - 0.5)
-	end
-
-	local marginalY = table.create(DEMAND_BINS, 0)
-	local marginalStepX = winW / DEMAND_BINS
-	local marginalStepY = halfH / DEMAND_BINS
-	for by = 0, DEMAND_BINS - 1 do
-		local y = (by + 0.5) * marginalStepY
-		local sum = 0
-		for bx = 0, DEMAND_BINS - 1 do
-			sum += demandAt((bx + 0.5) * marginalStepX, y)
-		end
-		marginalY[by + 1] = sum / DEMAND_BINS
-	end
-	local positionsY = buffer.create(gridH * 4)
-	local lutY = buffer.create(WARP_LUT_SIZE * 4)
-	buildAxisFromDemand(marginalY, gridH, winH, maxDensity, positionsY, 0, lutY, 0)
-
-	local positionsX = buffer.create(gridW * gridH * 4)
-	local lutX = buffer.create(WARP_LUT_SIZE * gridH * 4)
-	local slice = table.create(DEMAND_BINS, 0)
-	local sliceStep = halfW / DEMAND_BINS
-	for j = 0, gridH - 1 do
-		local rowY = buffer.readf32(positionsY, j * 4)
-		for bx = 1, DEMAND_BINS do
-			slice[bx] = demandAt((bx - 0.5) * sliceStep, rowY)
-		end
-		buildAxisFromDemand(slice, gridW, winW, maxDensity, positionsX, j * gridW * 4, lutX, j * WARP_LUT_SIZE * 4)
-	end
-
-	return positionsX, lutX, positionsY, lutY
-end
-
-local function warpLookup(lut: buffer, base: number, idx: number): number
-	if idx < 0 then
-		idx = 0
-	elseif idx > WARP_LUT_MAX then
-		idx = WARP_LUT_MAX
-	end
-	local i0 = idx // 1
-	local fraction = idx - i0
-	local g0 = buffer.readf32(lut, (base + i0) * 4)
-	local g1 = buffer.readf32(lut, (base + (if i0 < WARP_LUT_MAX then i0 + 1 else i0)) * 4)
-	return g0 + (g1 - g0) * fraction
-end
-Warp.warpLookup = warpLookup
-
-local function warpLookupX(lutX: buffer, gy: number, gridHm1: number, idx: number): number
-	local j0 = gy // 1
-	local fj = gy - j0
-	if j0 >= gridHm1 then
-		j0 = gridHm1
-		fj = 0
-	end
-	local g0 = warpLookup(lutX, j0 * WARP_LUT_SIZE, idx)
-	if fj <= 0 then
-		return g0
-	end
-	return g0 + (warpLookup(lutX, (j0 + 1) * WARP_LUT_SIZE, idx) - g0) * fj
-end
-Warp.warpLookupX = warpLookupX
-
-return Warp
-end
-
-__axiomGlassFactories['Liquid.Geometry'] = function()
-
-
-local Shape = __axiomGlassRequire("Liquid.Shape")
-local Refraction = __axiomGlassRequire("Liquid.Refraction")
-local Types = __axiomGlassRequire("Liquid.Types")
-
-type LiquidParams = Types.LiquidParams
-type GeometryEntry = Types.GeometryEntry
-
-local sdfRoundedRect = Shape.sdfRoundedRect
-local deriveShape = Shape.deriveShape
-local edgeFactorAt = Refraction.edgeFactorAt
-local DISP_CONST = Refraction.DISP_CONST
-local FETCH_ROOM = Refraction.FETCH_ROOM
-
-local MELT_SPAN_FLOOR = 0.25
-local DISP_FIXED_SCALE = 16 -- Q11.4 fixed point: the i16 maps store displacement px * 16
-local ROWS_PER_CLOCK_CHECK = 4 -- geometry build rows between deadline checks
-
-local Geometry = {}
-
-Geometry.DISP_FIXED_SCALE = DISP_FIXED_SCALE
-Geometry.MELT_SPAN_FLOOR = MELT_SPAN_FLOOR
-
-local function rimFactor(depth: number, k: number, hardness: number): number
-	local b = 1 + hardness - depth * k
-	if b <= 0 then
-		return 0
-	end
-	local b2 = b * b
-	return math.min(b2 * b2 * b, 1)
-end
-
-local function rimK(size: number): number?
-	return if size > 0 then (500 / size) ^ 2 / 1500 else nil
-end
-
-function Geometry.geometryKey(
-	winW: number,
-	winH: number,
-	outW: number,
-	outH: number,
-	params: LiquidParams,
-	rawField: boolean?
-): string
-	return (if rawField then "raw:" else "")
-		.. string.format(
-			"%d:%d:%d:%d:%.1f:%.2f:%.2f:%.3f:%.1f:%.3f:%.1f:%.3f:%.3f:%.3f:%.3f:%.4f",
-			math.round(winW),
-			math.round(winH),
-			outW,
-			outH,
-			params.cornerRadius,
-			params.superEllipseFactor,
-			params.thickness,
-			params.refractionFactor,
-			params.fresnelSize,
-			params.fresnelHardness,
-			params.glareSize,
-			params.glareHardness,
-			params.glareIntensity,
-			params.glareConvergence,
-			params.glareOppositeSide,
-			params.glareAngle
-		)
-end
-
-local geometryCache: { [string]: GeometryEntry } = {}
-
-function Geometry.acquireGeometry(
-	winW: number,
-	winH: number,
-	outW: number,
-	outH: number,
-	params: LiquidParams,
-	key: string,
-	rawField: boolean?
-): GeometryEntry
-	local entry = geometryCache[key]
-	if entry then
-		entry.Refs += 1
-		return entry
-	end
-
-	local pixelBytes = outW * outH * 4
-	local newEntry: GeometryEntry = {
-		Key = key,
-		Refs = 1,
-		Ready = false,
-		WinW = winW,
-		WinH = winH,
-		OutW = outW,
-		OutH = outH,
-		StepX = winW / outW,
-		StepY = winH / outH,
-		DispMap = buffer.create(pixelBytes),
-		AuxMap = buffer.create(pixelBytes),
-		Phase = 1,
-		Row = 0,
-		Params = params,
-		RawField = rawField == true,
-	}
-	geometryCache[key] = newEntry
-	return newEntry
-end
-
-function Geometry.releaseGeometry(entry: GeometryEntry)
-	entry.Refs -= 1
-	if entry.Refs <= 0 then
-		geometryCache[entry.Key] = nil
-	end
-end
-
-local function buildSdfRows(entry: GeometryEntry, deadline: number)
-	local aux = entry.AuxMap
-	local params = entry.Params
-	local outW, outH = entry.OutW, entry.OutH
-	local stepX, stepY = entry.StepX, entry.StepY
-	local centerX, centerY, radius, insetX, insetY, n, invN = deriveShape(params, entry.WinW, entry.WinH)
-	local fresnelHardness = params.fresnelHardness
-	local fresnelK = rimK(params.fresnelSize)
-	local invMaskStep = 1 / math.max(stepX, stepY)
-
-	local row = entry.Row
-	while row < outH do
-		local py = (row + 0.5) * stepY - centerY
-		local qy = math.abs(py) - insetY
-		local rowOffset = row * outW * 4
-		for x = 0, outW - 1 do
-			local px = (x + 0.5) * stepX - centerX
-			local qx = math.abs(px) - insetX
-			local d = sdfRoundedRect(qx, qy, radius, n, invN)
-			local depth = -d
-
-			local offset = rowOffset + x * 4
-			local fresnel = if fresnelK then rimFactor(depth, fresnelK, fresnelHardness) else 0
-			buffer.writeu8(aux, offset, math.round(fresnel * 255))
-			buffer.writeu8(aux, offset + 2, math.round(math.clamp(0.5 - d * invMaskStep, 0, 1) * 255))
-		end
-		row += 1
-		if row % ROWS_PER_CLOCK_CHECK == 0 and os.clock() >= deadline then
-			break
-		end
-	end
-
-	if row >= outH then
-		entry.Phase = 2
-		entry.Row = 0
-	else
-		entry.Row = row
-	end
-end
-
-local function buildDisplacementRows(entry: GeometryEntry, deadline: number)
-	local disp, aux = entry.DispMap, entry.AuxMap
-	local params = entry.Params
-	local rawField = entry.RawField
-	local outW, outH = entry.OutW, entry.OutH
-	local stepX, stepY = entry.StepX, entry.StepY
-	local centerX, centerY, radius, insetX, insetY, n, invN = deriveShape(params, entry.WinW, entry.WinH)
-	local halfMin = math.min(centerX, centerY)
-	local invMeltSpan = 1 / math.max(radius, MELT_SPAN_FLOOR * halfMin)
-	local thickness = params.thickness
-	local invRefFactor = 1 / params.refractionFactor
-	local glareHardness = params.glareHardness
-	local glareK = rimK(params.glareSize)
-	local glareIntensity = params.glareIntensity
-	local glareOpposite = params.glareOppositeSide
-	local glareExponent = 0.1 + params.glareConvergence * 2
-	local glareAngleBias = params.glareAngle - math.pi / 4
-	local twoPi = 2 * math.pi
-	local room = FETCH_ROOM * halfMin
-	local maxScale = edgeFactorAt(0, thickness, invRefFactor) * DISP_CONST
-	local zeroDepth = if glareK then math.max(thickness, (1 + glareHardness) / glareK) else thickness
-
-	local function contourAt(apx: number, apy: number, d: number): (number, number, number, number)
-		local v = d * invMeltSpan
-		if v > 1 then
-			v = 1
-		end
-		local beta = v * v * v * (v * (v * 6 - 15) + 10)
-		local rho = radius - d + beta * (halfMin - radius)
-		if rho < 0 then
-			rho = 0
-		end
-		local m = 2 + (n - 2) * (1 - beta)
-		local qx = apx - (centerX - d - rho)
-		local qy = apy - (centerY - d - rho)
-		local g
-		if qx > 0 and qy > 0 then
-			g = (qx ^ m + qy ^ m) ^ (1 / m) - rho
-		else
-			g = (if qx > qy then qx else qy) - rho
-		end
-		return g, qx, qy, m
-	end
-
-	local row = entry.Row
-	while row < outH do
-		local rowBase = row * outW
-		local py = (row + 0.5) * stepY - centerY
-		local absPy = math.abs(py)
-		local sy = if py >= 0 then 1 else -1
-		for x = 0, outW - 1 do
-			local offset = (rowBase + x) * 4
-			if buffer.readu8(aux, offset + 2) == 0 then
-				continue
-			end
-			local px = (x + 0.5) * stepX - centerX
-			local absPx = math.abs(px)
-			local sx = if px >= 0 then 1 else -1
-
-			local depth: number, qx: number, qy: number, m: number
-			if rawField then
-				qx, qy, m = absPx - insetX, absPy - insetY, n
-				depth = -sdfRoundedRect(qx, qy, radius, n, invN)
-				if depth < 0 then
-					depth = 0
-				elseif depth > zeroDepth then
-					continue
-				end
-			else
-				if contourAt(absPx, absPy, zeroDepth) < 0 then
-					continue
-				end
-
-				depth = 0
-				local g
-				g, qx, qy, m = contourAt(absPx, absPy, 0)
-				if g < 0 then
-					local lo, hi = 0, halfMin
-					for _ = 1, 20 do
-						local mid = (lo + hi) * 0.5
-						if contourAt(absPx, absPy, mid) < 0 then
-							lo = mid
-						else
-							hi = mid
-						end
-					end
-					depth = (lo + hi) * 0.5
-					g, qx, qy, m = contourAt(absPx, absPy, depth)
-				end
-			end
-
-			local dirX, dirY
-			if qx > 0 and qy > 0 then
-				dirX = sx * qx ^ (m - 1)
-				dirY = sy * qy ^ (m - 1)
-			elseif qy >= qx then
-				dirX = 0
-				dirY = sy
-			else
-				dirX = sx
-				dirY = 0
-			end
-
-			local len = math.sqrt(dirX * dirX + dirY * dirY)
-			local dispX, dispY = 0, 0
-			local glare = 0
-			if len > 1e-9 then
-				local invLen = 1 / len
-				local nx, ny = dirX * invLen, dirY * invLen
-
-				local scale = edgeFactorAt(depth, thickness, invRefFactor) * DISP_CONST
-				if maxScale > room then
-					local reach = px * nx + py * ny + room
-					if maxScale > reach then
-						scale = scale * reach / maxScale
-					end
-				end
-				dispX = -nx * scale
-				dispY = -ny * scale
-
-				if glareK then
-					local geo = rimFactor(depth, glareK, glareHardness)
-					if geo > 0 then
-						local angle = math.atan2(-ny, nx)
-						if angle < 0 then
-							angle += twoPi
-						end
-						local a = (angle + glareAngleBias) * 2
-						local farside = (a > 1.5 * math.pi and a < 3.5 * math.pi) or a < -0.5 * math.pi
-						local af = (0.5 + math.sin(a) * 0.5)
-							* 1.2
-							* (if farside then glareOpposite else 1)
-							* glareIntensity
-						glare = math.clamp(af ^ glareExponent, 0, 1) * geo
-					end
-				end
-			end
-
-			buffer.writei16(disp, offset, math.clamp(math.round(dispX * DISP_FIXED_SCALE), -32767, 32767))
-			buffer.writei16(disp, offset + 2, math.clamp(math.round(dispY * DISP_FIXED_SCALE), -32767, 32767))
-			buffer.writeu8(aux, offset + 1, math.round(glare * 255))
-		end
-		row += 1
-		if row % ROWS_PER_CLOCK_CHECK == 0 and os.clock() >= deadline then
-			break
-		end
-	end
-
-	if row >= outH then
-		entry.Phase = 3
-	else
-		entry.Row = row
-	end
-end
-
-function Geometry.stepGeometry(entry: GeometryEntry, deadline: number): boolean
-	if entry.Ready then
-		return true
-	end
-	if entry.Phase == 1 then
-		buildSdfRows(entry, deadline)
-	end
-	if entry.Phase == 2 and os.clock() < deadline then
-		buildDisplacementRows(entry, deadline)
-	end
-	if entry.Phase == 3 then
-		entry.Ready = true
-	end
-	return entry.Ready
-end
-
-return Geometry
-end
-
-__axiomGlassFactories['Liquid.Reconstruct'] = function()
-
-
-local Warp = __axiomGlassRequire("Liquid.Warp")
-local Geometry = __axiomGlassRequire("Liquid.Geometry")
-local Types = __axiomGlassRequire("Liquid.Types")
-
-type ReconJob = Types.ReconJob
-
-local warpLookup = Warp.warpLookup
-local warpLookupX = Warp.warpLookupX
-local WARP_LUT_MAX = Warp.WARP_LUT_MAX
-
-local INV_DISP_FIXED_SCALE = 1 / Geometry.DISP_FIXED_SCALE
-local INV_255 = 1 / 255
-
-local band = bit32.band
-local rshift = bit32.rshift
-
-local Reconstruct = {}
-
-local function clearColor(tintR: number, tintG: number, tintB: number): number
-	return (tintR * 255 + 0.5) // 1 + ((tintG * 255 + 0.5) // 1) * 0x100 + ((tintB * 255 + 0.5) // 1) * 0x10000
-end
-Reconstruct.clearColor = clearColor
-
-function Reconstruct.resampleGridBilinear(
-	old: buffer,
-	oldW: number,
-	oldH: number,
-	new: buffer,
-	newW: number,
-	newH: number
-)
-	local oldWm1, oldHm1 = oldW - 1, oldH - 1
-	local scaleX, scaleY = oldW / newW, oldH / newH
-	for y = 0, newH - 1 do
-		local sampleY = math.clamp((y + 0.5) * scaleY - 0.5, 0, oldHm1)
-		local y0 = sampleY // 1
-		local fy = sampleY - y0
-		local y1 = if y0 < oldHm1 then y0 + 1 else y0
-		local rowBase0 = y0 * oldW
-		local rowBase1 = y1 * oldW
-		local rowOffset = y * newW * 4
-		for x = 0, newW - 1 do
-			local sampleX = math.clamp((x + 0.5) * scaleX - 0.5, 0, oldWm1)
-			local x0 = sampleX // 1
-			local fx = sampleX - x0
-			local x1 = if x0 < oldWm1 then x0 + 1 else x0
-
-			local o00 = (rowBase0 + x0) * 4
-			local o10 = (rowBase0 + x1) * 4
-			local o01 = (rowBase1 + x0) * 4
-			local o11 = (rowBase1 + x1) * 4
-			local w11 = fx * fy
-			local w10 = fx - w11
-			local w01 = fy - w11
-			local w00 = 1 - fx - fy + w11
-
-			local offset = rowOffset + x * 4
-			for channel = 0, 2 do
-				local value = buffer.readu8(old, o00 + channel) * w00
-					+ buffer.readu8(old, o10 + channel) * w10
-					+ buffer.readu8(old, o01 + channel) * w01
-					+ buffer.readu8(old, o11 + channel) * w11
-				buffer.writeu8(new, offset + channel, math.round(value))
-			end
-			buffer.writeu8(new, offset + 3, 255)
-		end
-	end
-end
-
-
-
-local function cubicWeights(t: number): (number, number, number, number)
-	local t2 = t * t
-	local t3 = t2 * t
-	return 0.5 * (2 * t2 - t3 - t), 0.5 * (3 * t3 - 5 * t2 + 2), 0.5 * (4 * t2 - 3 * t3 + t), 0.5 * (t3 - t2)
-end
-
-local function cubicTaps(coordinate: number, limit: number): (number, number, number, number, number)
-	local base = coordinate // 1
-	local before = if base > 0 then base - 1 else 0
-	local after = if base < limit then base + 1 else base
-	local far = if after < limit then after + 1 else after
-	return before * 4, base * 4, after * 4, far * 4, coordinate - base
-end
-
-local function cubicRowFetch(
-	grid: buffer,
-	rowBase: number,
-	xm4: number,
-	x04: number,
-	x14: number,
-	x24: number,
-	w0: number,
-	w1: number,
-	w2: number,
-	w3: number
-): (number, number, number)
-	local c0 = buffer.readu32(grid, rowBase + xm4)
-	local c1 = buffer.readu32(grid, rowBase + x04)
-	local c2 = buffer.readu32(grid, rowBase + x14)
-	local c3 = buffer.readu32(grid, rowBase + x24)
-	return band(c0, 0xFF) * w0 + band(c1, 0xFF) * w1 + band(c2, 0xFF) * w2 + band(c3, 0xFF) * w3,
-		band(rshift(c0, 8), 0xFF) * w0 + band(rshift(c1, 8), 0xFF) * w1 + band(rshift(c2, 8), 0xFF) * w2 + band(
-			rshift(c3, 8),
-			0xFF
-		) * w3,
-		band(rshift(c0, 16), 0xFF) * w0 + band(rshift(c1, 16), 0xFF) * w1 + band(rshift(c2, 16), 0xFF) * w2 + band(
-			rshift(c3, 16),
-			0xFF
-		) * w3
-end
-
-local function cubicChannel(
-	grid: buffer,
-	gridW: number,
-	gridWm1: number,
-	gridHm1: number,
-	gx: number,
-	gy: number,
-	shift: number
-): number
-	if gx < 0 then
-		gx = 0
-	elseif gx > gridWm1 then
-		gx = gridWm1
-	end
-	if gy < 0 then
-		gy = 0
-	elseif gy > gridHm1 then
-		gy = gridHm1
-	end
-	local xm4, x04, x14, x24, tx = cubicTaps(gx, gridWm1)
-	local ym4, y04, y14, y24, ty = cubicTaps(gy, gridHm1)
-	local wx0, wx1, wx2, wx3 = cubicWeights(tx)
-	local wy0, wy1, wy2, wy3 = cubicWeights(ty)
-	local rb0, rb1, rb2, rb3 = ym4 * gridW, y04 * gridW, y14 * gridW, y24 * gridW
-	local row0 = band(rshift(buffer.readu32(grid, rb0 + xm4), shift), 0xFF) * wx0
-		+ band(rshift(buffer.readu32(grid, rb0 + x04), shift), 0xFF) * wx1
-		+ band(rshift(buffer.readu32(grid, rb0 + x14), shift), 0xFF) * wx2
-		+ band(rshift(buffer.readu32(grid, rb0 + x24), shift), 0xFF) * wx3
-	local row1 = band(rshift(buffer.readu32(grid, rb1 + xm4), shift), 0xFF) * wx0
-		+ band(rshift(buffer.readu32(grid, rb1 + x04), shift), 0xFF) * wx1
-		+ band(rshift(buffer.readu32(grid, rb1 + x14), shift), 0xFF) * wx2
-		+ band(rshift(buffer.readu32(grid, rb1 + x24), shift), 0xFF) * wx3
-	local row2 = band(rshift(buffer.readu32(grid, rb2 + xm4), shift), 0xFF) * wx0
-		+ band(rshift(buffer.readu32(grid, rb2 + x04), shift), 0xFF) * wx1
-		+ band(rshift(buffer.readu32(grid, rb2 + x14), shift), 0xFF) * wx2
-		+ band(rshift(buffer.readu32(grid, rb2 + x24), shift), 0xFF) * wx3
-	local row3 = band(rshift(buffer.readu32(grid, rb3 + xm4), shift), 0xFF) * wx0
-		+ band(rshift(buffer.readu32(grid, rb3 + x04), shift), 0xFF) * wx1
-		+ band(rshift(buffer.readu32(grid, rb3 + x14), shift), 0xFF) * wx2
-		+ band(rshift(buffer.readu32(grid, rb3 + x24), shift), 0xFF) * wx3
-	return row0 * wy0 + row1 * wy1 + row2 * wy2 + row3 * wy3
-end
-
-function Reconstruct.reconstructRows(job: ReconJob, deadline: number): boolean
-	local out, disp, aux, grid = job.Out, job.Disp, job.Aux, job.Grid
-	local gridW = job.GridW
-	local gridWm1, gridHm1 = job.GridW - 1, job.GridH - 1
-	local outW, outH = job.OutW, job.OutH
-	local rowEnd = job.RowEnd
-	local stepX, stepY = job.StepX, job.StepY
-	local warpX, warpY = job.WarpX, job.WarpY
-	local lutScaleX = WARP_LUT_MAX / (stepX * outW)
-	local lutScaleY = WARP_LUT_MAX / (stepY * outH)
-	local tintAlpha = job.TintAlpha
-	local keep = 1 - tintAlpha
-	local tintR = job.TintR * 255 * tintAlpha
-	local tintG = job.TintG * 255 * tintAlpha
-	local tintB = job.TintB * 255 * tintAlpha
-	local redScale, blueScale = job.RedScale, job.BlueScale
-	local dispersing = redScale ~= 1
-	local bilinear = job.BilinearFetch == true
-	local clear = clearColor(job.TintR, job.TintG, job.TintB)
-
-	if job.TintAlpha >= 1 then
-		local row = job.Row
-		while row < rowEnd do
-			local rowOffset = row * outW * 4
-			for x = 0, outW - 1 do
-				local offset = rowOffset + x * 4
-				buffer.writeu32(out, offset, clear + buffer.readu8(aux, offset + 2) * 0x1000000)
-			end
-			row += 1
-			if os.clock() >= deadline then
-				break
-			end
-		end
-		job.Row = row
-		return row >= rowEnd
-	end
-
-	local row = job.Row
-	while row < rowEnd do
-		local wy = (row + 0.5) * stepY
-		local rowGY = warpLookup(warpY, 0, wy * lutScaleY)
-		local rowOffset = row * outW * 4
-		for x = 0, outW - 1 do
-			local offset = rowOffset + x * 4
-			local alpha = buffer.readu8(aux, offset + 2)
-			if alpha == 0 then
-				buffer.writeu32(out, offset, clear) -- outside the shape
-			else
-				local dispX = buffer.readi16(disp, offset) * INV_DISP_FIXED_SCALE
-				local dispY = buffer.readi16(disp, offset + 2) * INV_DISP_FIXED_SCALE
-				local r: number, g: number, b: number
-				if dispersing and (dispX ~= 0 or dispY ~= 0) then
-					local wx = (x + 0.5) * stepX
-					local redY, greenY, blueY
-					if dispY == 0 then
-						redY, greenY, blueY = rowGY, rowGY, rowGY
-					else
-						redY = warpLookup(warpY, 0, (wy + dispY * redScale) * lutScaleY)
-						greenY = warpLookup(warpY, 0, (wy + dispY) * lutScaleY)
-						blueY = warpLookup(warpY, 0, (wy + dispY * blueScale) * lutScaleY)
-					end
-					local redX = warpLookupX(warpX, redY, gridHm1, (wx + dispX * redScale) * lutScaleX)
-					local greenX = warpLookupX(warpX, greenY, gridHm1, (wx + dispX) * lutScaleX)
-					local blueX = warpLookupX(warpX, blueY, gridHm1, (wx + dispX * blueScale) * lutScaleX)
-					r = cubicChannel(grid, gridW, gridWm1, gridHm1, redX, redY, 0)
-					g = cubicChannel(grid, gridW, gridWm1, gridHm1, greenX, greenY, 8)
-					b = cubicChannel(grid, gridW, gridWm1, gridHm1, blueX, blueY, 16)
-				else
-					local gy = if dispY == 0 then rowGY else warpLookup(warpY, 0, (wy + dispY) * lutScaleY)
-					local gx = warpLookupX(warpX, gy, gridHm1, ((x + 0.5) * stepX + dispX) * lutScaleX)
-					if bilinear then
-						local x0 = gx // 1
-						local fx = gx - x0
-						local x1 = if x0 < gridWm1 then x0 + 1 else x0
-						local y0 = gy // 1
-						local fy = gy - y0
-						local y1 = if y0 < gridHm1 then y0 + 1 else y0
-						local c00 = buffer.readu32(grid, (y0 * gridW + x0) * 4)
-						local c10 = buffer.readu32(grid, (y0 * gridW + x1) * 4)
-						local c01 = buffer.readu32(grid, (y1 * gridW + x0) * 4)
-						local c11 = buffer.readu32(grid, (y1 * gridW + x1) * 4)
-						local w11 = fx * fy
-						local w10 = fx - w11
-						local w01 = fy - w11
-						local w00 = 1 - fx - fy + w11
-						r = band(c00, 0xFF) * w00
-							+ band(c10, 0xFF) * w10
-							+ band(c01, 0xFF) * w01
-							+ band(c11, 0xFF) * w11
-						g = band(rshift(c00, 8), 0xFF) * w00
-							+ band(rshift(c10, 8), 0xFF) * w10
-							+ band(rshift(c01, 8), 0xFF) * w01
-							+ band(rshift(c11, 8), 0xFF) * w11
-						b = band(rshift(c00, 16), 0xFF) * w00
-							+ band(rshift(c10, 16), 0xFF) * w10
-							+ band(rshift(c01, 16), 0xFF) * w01
-							+ band(rshift(c11, 16), 0xFF) * w11
-					else
-						local xm4, x04, x14, x24, tx = cubicTaps(gx, gridWm1)
-						local ym4, y04, y14, y24, ty = cubicTaps(gy, gridHm1)
-						local wx0, wx1, wx2, wx3 = cubicWeights(tx)
-						local wy0, wy1, wy2, wy3 = cubicWeights(ty)
-						local r0, g0, b0 = cubicRowFetch(grid, ym4 * gridW, xm4, x04, x14, x24, wx0, wx1, wx2, wx3)
-						local r1, g1, b1 = cubicRowFetch(grid, y04 * gridW, xm4, x04, x14, x24, wx0, wx1, wx2, wx3)
-						local r2, g2, b2 = cubicRowFetch(grid, y14 * gridW, xm4, x04, x14, x24, wx0, wx1, wx2, wx3)
-						local r3, g3, b3 = cubicRowFetch(grid, y24 * gridW, xm4, x04, x14, x24, wx0, wx1, wx2, wx3)
-						r = r0 * wy0 + r1 * wy1 + r2 * wy2 + r3 * wy3
-						g = g0 * wy0 + g1 * wy1 + g2 * wy2 + g3 * wy3
-						b = b0 * wy0 + b1 * wy1 + b2 * wy2 + b3 * wy3
-					end
-				end
-				if r < 0 then
-					r = 0
-				elseif r > 255 then
-					r = 255
-				end
-				if g < 0 then
-					g = 0
-				elseif g > 255 then
-					g = 255
-				end
-				if b < 0 then
-					b = 0
-				elseif b > 255 then
-					b = 255
-				end
-				r = r * keep + tintR
-				g = g * keep + tintG
-				b = b * keep + tintB
-				buffer.writeu32(
-					out,
-					offset,
-					(r + 0.5) // 1 + (g + 0.5) // 1 * 0x100 + (b + 0.5) // 1 * 0x10000 + alpha * 0x1000000
-				)
-			end
-		end
-		row += 1
-		if os.clock() >= deadline then
-			break
-		end
-	end
-
-	job.Row = row
-	return row >= rowEnd
-end
-
-function Reconstruct.compositeRim(out: buffer, aux: buffer, pixelCount: number, fresnelIntensity: number)
-	local fresnelScale = fresnelIntensity * 0.7 * INV_255
-	for offset = 0, pixelCount * 4 - 4, 4 do
-		if buffer.readu8(aux, offset + 2) ~= 0 then
-			local wf = buffer.readu8(aux, offset) * fresnelScale
-			local wg = buffer.readu8(aux, offset + 1) * INV_255
-			local white = wf + wg - wf * wg
-			if white > 0 then
-				local r = buffer.readu8(out, offset)
-				local g = buffer.readu8(out, offset + 1)
-				local b = buffer.readu8(out, offset + 2)
-				buffer.writeu8(out, offset, (r + (255 - r) * white + 0.5) // 1)
-				buffer.writeu8(out, offset + 1, (g + (255 - g) * white + 0.5) // 1)
-				buffer.writeu8(out, offset + 2, (b + (255 - b) * white + 0.5) // 1)
-			end
-		end
-	end
-end
-
-return Reconstruct
-end
-
-__axiomGlassFactories['Liquid.Heatmap'] = function()
-
-
-local Warp = __axiomGlassRequire("Liquid.Warp")
-local Types = __axiomGlassRequire("Liquid.Types")
-
-type ReconJob = Types.ReconJob
-
-local warpLookup = Warp.warpLookup
-local warpLookupX = Warp.warpLookupX
-local WARP_LUT_MAX = Warp.WARP_LUT_MAX
-
-local HEAT_STOPS = {
-	{ 20, 20, 120 }, -- deep blue: ~1/8x uniform and below
-	{ 0, 150, 255 },
-	{ 0, 220, 120 }, -- green: around uniform
-	{ 255, 220, 0 },
-	{ 255, 40, 0 }, -- red: ~32x uniform and above
-}
-local HEAT_LOG_MIN = -3
-local HEAT_LOG_MAX = 5
-
-local Heatmap = {}
-
-function Heatmap.renderDensityHeatmap(job: ReconJob)
-	local out, aux = job.Out, job.Aux
-	local outW, outH = job.OutW, job.OutH
-	local stepX, stepY = job.StepX, job.StepY
-	local warpX, warpY = job.WarpX, job.WarpY
-	local gridHm1 = job.GridH - 1
-	local lutScaleX = WARP_LUT_MAX / (stepX * outW)
-	local lutScaleY = WARP_LUT_MAX / (stepY * outH)
-	local baseX = job.GridW / (stepX * outW) -- uniform grid cells per window px
-	local baseY = job.GridH / (stepY * outH)
-	local logRange = HEAT_LOG_MAX - HEAT_LOG_MIN
-	local stopCount = #HEAT_STOPS
-
-	for y = 1, outH do
-		local wy = (y - 0.5) * stepY
-		local gy = warpLookup(warpY, 0, wy * lutScaleY)
-		local slopeY = (
-			warpLookup(warpY, 0, (wy + 0.5 * stepY) * lutScaleY)
-			- warpLookup(warpY, 0, (wy - 0.5 * stepY) * lutScaleY)
-		) / stepY
-		local ry = math.max(slopeY / baseY, 1e-4)
-		local rowOffset = (y - 1) * outW * 4
-		for x = 1, outW do
-			local offset = rowOffset + (x - 1) * 4
-			local alpha = buffer.readu8(aux, offset + 2)
-			if alpha == 0 then
-				buffer.writeu32(out, offset, 0)
-			else
-				local wx = (x - 0.5) * stepX
-				local slopeX = (
-					warpLookupX(warpX, gy, gridHm1, (wx + 0.5 * stepX) * lutScaleX)
-					- warpLookupX(warpX, gy, gridHm1, (wx - 0.5 * stepX) * lutScaleX)
-				) / stepX
-				local rx = math.max(slopeX / baseX, 1e-4)
-				local t = math.clamp((math.log(rx * ry, 2) - HEAT_LOG_MIN) / logRange, 0, 1)
-				local scaled = t * (stopCount - 1)
-				local i0 = math.min(scaled // 1, stopCount - 2)
-				local fraction = scaled - i0
-				local c0 = HEAT_STOPS[i0 + 1]
-				local c1 = HEAT_STOPS[i0 + 2]
-				local r = c0[1] + (c1[1] - c0[1]) * fraction
-				local g = c0[2] + (c1[2] - c0[2]) * fraction
-				local b = c0[3] + (c1[3] - c0[3]) * fraction
-				buffer.writeu32(
-					out,
-					offset,
-					(r + 0.5) // 1 + (g + 0.5) // 1 * 0x100 + (b + 0.5) // 1 * 0x10000 + alpha * 0x1000000
-				)
-			end
-		end
-	end
-
-	job.Row = outH
-end
-
-return Heatmap
-end
-
-__axiomGlassFactories['Liquid.DebugOverlay'] = function()
-
-
-local Shape = __axiomGlassRequire("Liquid.Shape")
-local Geometry = __axiomGlassRequire("Liquid.Geometry")
-local Types = __axiomGlassRequire("Liquid.Types")
-
-type ReconJob = Types.ReconJob
-type LiquidParams = Types.LiquidParams
-
-local sdfRoundedRect = Shape.sdfRoundedRect
-local deriveShape = Shape.deriveShape
-local MELT_SPAN_FLOOR = Geometry.MELT_SPAN_FLOOR
-
-local band = bit32.band
-local rshift = bit32.rshift
-
-local CONTOUR_LEVELS = 9 -- family contours drawn between the rim and the center
-local SWEEP_RATE = 0.15 -- animated sweep contours per second
-local ARC_STEPS = 24 -- parametric steps along one corner arc
-
-local DebugOverlay = {}
-
-local function blendPixel(out: buffer, offset: number, r: number, g: number, b: number, a: number)
-	local keep = 1 - a
-	buffer.writeu8(out, offset, (buffer.readu8(out, offset) * keep + r * a + 0.5) // 1)
-	buffer.writeu8(out, offset + 1, (buffer.readu8(out, offset + 1) * keep + g * a + 0.5) // 1)
-	buffer.writeu8(out, offset + 2, (buffer.readu8(out, offset + 2) * keep + b * a + 0.5) // 1)
-end
-
-local function splat(
-	out: buffer,
-	outW: number,
-	outH: number,
-	x: number,
-	y: number,
-	radius: number,
-	r: number,
-	g: number,
-	b: number,
-	strength: number
-)
-	local invRadius = 1 / radius
-	local x0 = math.max((x - radius) // 1, 0)
-	local x1 = math.min((x + radius) // 1, outW - 1)
-	local y0 = math.max((y - radius) // 1, 0)
-	local y1 = math.min((y + radius) // 1, outH - 1)
-	for py = y0, y1 do
-		local dy = py + 0.5 - y
-		for px = x0, x1 do
-			local dx = px + 0.5 - x
-			local w = 1 - math.sqrt(dx * dx + dy * dy) * invRadius
-			if w > 0 then
-				blendPixel(out, (py * outW + px) * 4, r, g, b, strength * w)
-			end
-		end
-	end
-end
-
-local function strokePolyline(
-	out: buffer,
-	outW: number,
-	outH: number,
-	points: { number },
-	radius: number,
-	r: number,
-	g: number,
-	b: number,
-	strength: number
-)
-	local ax, ay = points[1], points[2]
-	splat(out, outW, outH, ax, ay, radius, r, g, b, strength)
-	for i = 3, #points - 1, 2 do
-		local bx, by = points[i], points[i + 1]
-		local dx, dy = bx - ax, by - ay
-		local length = math.sqrt(dx * dx + dy * dy)
-		if length > 1e-6 then
-			local steps = math.max(math.ceil(length / 0.75), 1)
-			for k = 1, steps do
-				local t = k / steps
-				splat(out, outW, outH, ax + dx * t, ay + dy * t, radius, r, g, b, strength)
-			end
-		end
-		ax, ay = bx, by
-	end
-end
-
-local function strokeLine(
-	out: buffer,
-	outW: number,
-	outH: number,
-	points: { number },
-	width: number,
-	r: number,
-	g: number,
-	b: number,
-	strength: number
-)
-	strokePolyline(out, outW, outH, points, width * 2, 0, 0, 0, strength * 0.4)
-	strokePolyline(out, outW, outH, points, width, r, g, b, strength)
-end
-
-local function contourQuadrant(hx: number, hy: number, rho: number, m: number): { number }
-	local points = { 0, hy }
-	local cornerX, cornerY = hx - rho, hy - rho
-	if rho > 1e-3 then
-		local power = 2 / m
-		for k = ARC_STEPS, 0, -1 do
-			local t = k / ARC_STEPS * (math.pi / 2)
-			table.insert(points, cornerX + rho * math.cos(t) ^ power)
-			table.insert(points, cornerY + rho * math.sin(t) ^ power)
-		end
-	else
-		table.insert(points, hx)
-		table.insert(points, hy)
-	end
-	table.insert(points, hx)
-	table.insert(points, 0)
-	return points
-end
-
-local function drawFamilyContour(
-	job: ReconJob,
-	halfW: number,
-	halfH: number,
-	family: (d: number) -> (number, number),
-	d: number,
-	width: number,
-	r: number,
-	g: number,
-	b: number,
-	strength: number
-)
-	local hx, hy = halfW - d, halfH - d
-	if hx <= 0 or hy <= 0 then
-		return
-	end
-	local rho, m = family(d)
-	local quadrant = contourQuadrant(hx, hy, rho, m)
-	local out, outW, outH = job.Out, job.OutW, job.OutH
-	local invStepX, invStepY = 1 / job.StepX, 1 / job.StepY
-	for sy = -1, 1, 2 do
-		for sx = -1, 1, 2 do
-			local mirrored = table.create(#quadrant)
-			for i = 1, #quadrant - 1, 2 do
-				table.insert(mirrored, (halfW + sx * quadrant[i]) * invStepX)
-				table.insert(mirrored, (halfH + sy * quadrant[i + 1]) * invStepY)
-			end
-			strokeLine(out, outW, outH, mirrored, width, r, g, b, strength)
-		end
-	end
-end
-
-function DebugOverlay.drawContourOverlay(job: ReconJob, params: LiquidParams, melt: boolean)
-	local winW, winH = job.StepX * job.OutW, job.StepY * job.OutH
-	local halfW, halfH, radius, _, _, n = deriveShape(params, winW, winH)
-	local halfMin = math.min(halfW, halfH)
-	local invMeltSpan = 1 / math.max(radius, MELT_SPAN_FLOOR * halfMin)
-
-	local function family(d: number): (number, number)
-		if melt then
-			local v = d * invMeltSpan
-			if v > 1 then
-				v = 1
-			end
-			local beta = v * v * v * (v * (v * 6 - 15) + 10)
-			return math.max(radius - d + beta * (halfMin - radius), 0), 2 + (n - 2) * (1 - beta)
-		end
-		return math.max(radius - d, 0), n
-	end
-
-	for level = 1, CONTOUR_LEVELS do
-		local d = level / (CONTOUR_LEVELS + 1) * halfMin
-		drawFamilyContour(job, halfW, halfH, family, d, 1.2, 255, 255, 255, 0.55)
-	end
-	if melt then
-		local sweep = (os.clock() * SWEEP_RATE % 1) * CONTOUR_LEVELS / (CONTOUR_LEVELS + 1) * halfMin
-		drawFamilyContour(job, halfW, halfH, family, sweep, 1.8, 255, 190, 70, 0.95)
-	end
-end
-
-function DebugOverlay.drawNormalOverlay(job: ReconJob, params: LiquidParams, rawField: boolean)
-	local out, aux = job.Out, job.Aux
-	local outW, outH = job.OutW, job.OutH
-	local stepX, stepY = job.StepX, job.StepY
-	local winW, winH = stepX * outW, stepY * outH
-	local halfW, halfH, radius, insetX, insetY, n, invN = deriveShape(params, winW, winH)
-	local halfMin = math.min(halfW, halfH)
-	local invMeltSpan = 1 / math.max(radius, MELT_SPAN_FLOOR * halfMin)
-	local thickness = params.thickness
-
-	local function contourAt(apx: number, apy: number, d: number): (number, number, number, number)
-		local v = d * invMeltSpan
-		if v > 1 then
-			v = 1
-		end
-		local beta = v * v * v * (v * (v * 6 - 15) + 10)
-		local rho = radius - d + beta * (halfMin - radius)
-		if rho < 0 then
-			rho = 0
-		end
-		local m = 2 + (n - 2) * (1 - beta)
-		local qx = apx - (halfW - d - rho)
-		local qy = apy - (halfH - d - rho)
-		local g
-		if qx > 0 and qy > 0 then
-			g = (qx ^ m + qy ^ m) ^ (1 / m) - rho
-		else
-			g = (if qx > qy then qx else qy) - rho
-		end
-		return g, qx, qy, m
-	end
-
-	local spacing = math.max(math.min(outW, outH) / 16, 7) -- output px between arrows
-	local shaft = spacing * 0.36 -- half-length of an arrow
-	local head = spacing * 0.3
-	local rows = (outH / spacing) // 1
-	local columns = (outW / spacing) // 1
-	for row = 0, rows - 1 do
-		local y = (row + 0.5) * spacing + (outH - rows * spacing) / 2
-		local wy = y * stepY
-		local py = wy - halfH
-		local absPy = math.abs(py)
-		local sy = if py >= 0 then 1 else -1
-		for column = 0, columns - 1 do
-			local x = (column + 0.5) * spacing + (outW - columns * spacing) / 2
-			if buffer.readu8(aux, ((y // 1) * outW + x // 1) * 4 + 2) == 0 then
-				continue
-			end
-			local wx = x * stepX
-			local px = wx - halfW
-			local absPx = math.abs(px)
-			local sx = if px >= 0 then 1 else -1
-
-			local depth: number, qx: number, qy: number, m: number
-			if rawField then
-				qx, qy, m = absPx - insetX, absPy - insetY, n
-				depth = math.max(-sdfRoundedRect(qx, qy, radius, n, invN), 0)
-			else
-				depth = 0
-				local g
-				g, qx, qy, m = contourAt(absPx, absPy, 0)
-				if g < 0 then
-					local lo, hi = 0, halfMin
-					for _ = 1, 20 do
-						local mid = (lo + hi) * 0.5
-						if contourAt(absPx, absPy, mid) < 0 then
-							lo = mid
-						else
-							hi = mid
-						end
-					end
-					depth = (lo + hi) * 0.5
-					g, qx, qy, m = contourAt(absPx, absPy, depth)
-				end
-			end
-			if depth >= thickness then
-				continue
-			end
-
-			local dirX, dirY
-			if qx > 0 and qy > 0 then
-				dirX = sx * qx ^ (m - 1)
-				dirY = sy * qy ^ (m - 1)
-			elseif qy >= qx then
-				dirX = 0
-				dirY = sy
-			else
-				dirX = sx
-				dirY = 0
-			end
-			local length = math.sqrt(dirX * dirX + dirY * dirY)
-			if length < 1e-9 then
-				continue
-			end
-			dirX, dirY = dirX / length, dirY / length
-
-			local tipX, tipY = x + dirX * shaft, y + dirY * shaft
-			local headX = -dirX * 0.82 -- cos(±145 degrees) folded into the
-			local headY = -dirY * 0.82 -- rotation applied to the direction
-			local sideX, sideY = -dirY * 0.57, dirX * 0.57
-			strokeLine(out, outW, outH, {
-				x - dirX * shaft,
-				y - dirY * shaft,
-				tipX,
-				tipY,
-				tipX + (headX + sideX) * head,
-				tipY + (headY + sideY) * head,
-				tipX,
-				tipY,
-				tipX + (headX - sideX) * head,
-				tipY + (headY - sideY) * head,
-			}, 1, 255, 255, 255, 0.85)
-		end
-	end
-end
-
-function DebugOverlay.drawCellCenterOverlay(job: ReconJob, gridPosX: buffer, gridPosY: buffer, uniform: boolean)
-	local out = job.Out
-	local outW, outH = job.OutW, job.OutH
-	local gridW, gridH = job.GridW, job.GridH
-	local invStepX, invStepY = 1 / job.StepX, 1 / job.StepY
-	local cellW = job.StepX * outW / gridW -- uniform spacing in window px
-	local cellH = job.StepY * outH / gridH
-	for j = 0, gridH - 1 do
-		local y = (if uniform then (j + 0.5) * cellH else buffer.readf32(gridPosY, j * 4)) * invStepY
-		local rowBase = j * gridW
-		for i = 0, gridW - 1 do
-			local x = (if uniform then (i + 0.5) * cellW else buffer.readf32(gridPosX, (rowBase + i) * 4)) * invStepX
-			splat(out, outW, outH, x, y, 2.2, 0, 0, 0, 0.5)
-			splat(out, outW, outH, x, y, 1.2, 255, 255, 255, 0.95)
-		end
-	end
-end
-
-function DebugOverlay.renderGridView(job: ReconJob, frontIndex: number, highlightFront: boolean)
-	local out, grid = job.Out, job.Grid
-	local outW, outH = job.OutW, job.OutH
-	local gridW, gridH = job.GridW, job.GridH
-	local cellCount = gridW * gridH
-	local invCellCount = 1 / cellCount
-	local newest = frontIndex - 1
-	local boostScale = if highlightFront then 0.65 else 0
-	for y = 0, outH - 1 do
-		local gridRow = y * gridH // outH * gridW
-		local rowOffset = y * outW * 4
-		for x = 0, outW - 1 do
-			local cell = gridRow + x * gridW // outW
-			local color = buffer.readu32(grid, cell * 4)
-			local age = (newest - cell) % cellCount * invCellCount
-			local fade = 1 - age
-			local fade4 = fade * fade * fade * fade
-			local boost = fade4 * fade4 * fade4 * boostScale -- a tail about a tenth of the walk long
-			local r = band(color, 0xFF)
-			local g = band(rshift(color, 8), 0xFF)
-			local b = band(rshift(color, 16), 0xFF)
-			buffer.writeu32(
-				out,
-				rowOffset + x * 4,
-				(r + (255 - r) * boost + 0.5) // 1
-					+ ((g + (255 - g) * boost + 0.5) // 1) * 0x100
-					+ ((b + (255 - b) * boost + 0.5) // 1) * 0x10000
-					+ 0xFF000000
-			)
-		end
-	end
-	job.Row = outH
-end
-
-return DebugOverlay
-end
-
-__axiomGlassFactories['Liquid'] = function()
-
-
-local Types = __axiomGlassRequire("Liquid.Types")
-local Refraction = __axiomGlassRequire("Liquid.Refraction")
-local Warp = __axiomGlassRequire("Liquid.Warp")
-local Geometry = __axiomGlassRequire("Liquid.Geometry")
-local Reconstruct = __axiomGlassRequire("Liquid.Reconstruct")
-local Heatmap = __axiomGlassRequire("Liquid.Heatmap")
-local DebugOverlay = __axiomGlassRequire("Liquid.DebugOverlay")
-
-export type LiquidParams = Types.LiquidParams
-export type GeometryEntry = Types.GeometryEntry
-export type ReconJob = Types.ReconJob
-
-return {
-	dispersionScales = Refraction.dispersionScales,
-
-	warpKey = Warp.warpKey,
-	buildWarp = Warp.buildWarp,
-
-	geometryKey = Geometry.geometryKey,
-	acquireGeometry = Geometry.acquireGeometry,
-	releaseGeometry = Geometry.releaseGeometry,
-	stepGeometry = Geometry.stepGeometry,
-
-	clearColor = Reconstruct.clearColor,
-	resampleGridBilinear = Reconstruct.resampleGridBilinear,
-	reconstructRows = Reconstruct.reconstructRows,
-	compositeRim = Reconstruct.compositeRim,
-
-	renderDensityHeatmap = Heatmap.renderDensityHeatmap,
-
-	drawContourOverlay = DebugOverlay.drawContourOverlay,
-	drawNormalOverlay = DebugOverlay.drawNormalOverlay,
-	drawCellCenterOverlay = DebugOverlay.drawCellCenterOverlay,
-	renderGridView = DebugOverlay.renderGridView,
-}
-end
-
-__axiomGlassFactories['GlassObject'] = function()
-
-
-local Liquid = __axiomGlassRequire("Liquid")
-
-export type ParallelWorkerState = {
-	Actor: Actor,
-	Slot: number, -- results key this worker's chunk strings land under
-	RowNext: number, -- next absolute row expected back from this worker
-	RowEnd: number, -- exclusive end of this worker's band
-	AwaitingRows: number, -- rows in the chunk currently in flight; 0 once the band is done
-}
-
-export type ParallelPending = {
-	PassId: number,
-	Job: Liquid.ReconJob, -- Job.Out gathers the bands; the finish stages then read the job on the main thread
-	Results: SharedTable, -- workers write chunk strings into per-band slots here
-	Workers: { ParallelWorkerState },
-	FramesWaited: number, -- frames since any chunk arrived, for the timeout
-}
-
-export type GlassObject = {
-	Window: GuiObject,
-	Pane: ImageLabel, -- library-owned child; not clipped by window UICorner so full mask shows
-	EditableImage: EditableImage?,
-	WarnedImageCreateFailure: boolean,
-	Initialized: boolean, -- window has been parented and configured
-	Parented: boolean, -- mirrors Window.Parent to skip per-pixel Instance reads
-	Pixels: buffer, -- u8 RGBA grid accumulator, row-major
-	Scratch: buffer, -- grid snapshot for reconstruction
-	PixelCount: number,
-	PixelIndex: number, -- 0-based byte offset into Pixels
-	Resolution: Vector2, -- source-grid resolution
-	ResolutionX: number, -- Resolution.X as plain number for hot path
-	GridPosX: buffer?, -- f32 per grid cell, x center in window coordinates (each row has its own warp)
-	GridPosY: buffer?, -- f32 per grid row, y center
-	WarpLutX: buffer?, -- per-row window-x to grid-column lookup tables
-	WarpLutY: buffer?, -- window-y to grid-row lookup table
-	WarpKey: string?, -- input signature of the built warp; skips rebuilds when unchanged
-	WindowPositionX: number,
-	WindowPositionY: number,
-	WindowColor: { number },
-	BlurRadius: number, -- resolved px, converted to output-px sigma by frost
-	Paused: boolean,
-	LiquidParams: Liquid.LiquidParams?,
-	Geometry: Liquid.GeometryEntry?,
-	OutputResolution: Vector2,
-	OutPixels: buffer?, -- u8 RGBA reconstruction target
-	OutBlend: buffer?, -- base-level blur copy the frost's level mix reads from
-	ReconJob: Liquid.ReconJob?, -- non-nil while a synchronous reconstruction pass is in flight
-	ParallelJob: ParallelPending?, -- non-nil while the worker pool runs this window's pass
-	ParallelId: number, -- the window's identity in worker-side caches; 0 until the first scatter
-	MapsGeneration: number, -- bumped when the warp or geometry maps rebuild; workers cache the maps keyed by it
-	FinishToken: {}?, -- identity token for the in-flight finish thread; clearing it cancels a stale finish before it uploads
-	ForceRecon: boolean,
-	GridWritesSinceRecon: number,
-	FramesSinceRecon: number,
-	SamplesLastFrame: number, -- backdrop samples this window got last frame, for the debug stats
-	PendingLayout: boolean, -- a layout change is being debounced
-	LastLayoutRequestClock: number,
-	FirstLayoutRequestClock: number, -- when the pending debounce began
-	LadderCap: number, -- resolution cap imposed by the step-down ladder
-	UICornerConnection: RBXScriptConnection?,
-	Connections: { RBXScriptConnection }, -- disconnected when the window is removed
-}
-
-local GlassObject = {}
-
-GlassObject.list = {} :: { GlassObject }
-GlassObject.byWindow = setmetatable({} :: { [GuiObject]: GlassObject }, { __mode = "k" })
-
-function GlassObject.addToUpdateList(glassObject: GlassObject)
-	if not table.find(GlassObject.list, glassObject) then
-		table.insert(GlassObject.list, glassObject)
-	end
-end
-
-function GlassObject.removeFromUpdateList(glassObject: GlassObject)
-	local index = table.find(GlassObject.list, glassObject)
-	if index then
-		table.remove(GlassObject.list, index)
-	end
-end
-
-function GlassObject.isOpaque(glassObject: GlassObject): boolean
-	return glassObject.WindowColor[4] >= 1
-end
-
-function GlassObject.create(Window: GuiObject): GlassObject
-	local windowColor = Window.BackgroundColor3
-	local initialPixels = buffer.create(4)
-	buffer.writeu32(initialPixels, 0, Liquid.clearColor(windowColor.R, windowColor.G, windowColor.B) + 0xFF000000)
-
-	local pane = Instance.new("ImageLabel")
-	pane.Name = "GlassPane"
-	pane.Size = UDim2.fromScale(1, 1)
-	pane.BackgroundTransparency = 1
-	pane.BorderSizePixel = 0
-	pane.ZIndex = -999999
-	pane.Parent = Window
-
-	local glassObject = {
-		Window = Window,
-		Pane = pane,
-		EditableImage = nil :: EditableImage?,
-		WarnedImageCreateFailure = false,
-		Initialized = false,
-		Parented = Window.Parent ~= nil,
-		Pixels = initialPixels,
-		Scratch = buffer.create(4),
-		PixelCount = 1,
-		PixelIndex = 0,
-		Resolution = Vector2.one,
-		ResolutionX = 1,
-		GridPosX = nil :: buffer?,
-		GridPosY = nil :: buffer?,
-		WarpLutX = nil :: buffer?,
-		WarpLutY = nil :: buffer?,
-		WarpKey = nil :: string?,
-		WindowPositionX = 0,
-		WindowPositionY = 0,
-		WindowColor = {
-			windowColor.R,
-			windowColor.G,
-			windowColor.B,
-			1 - Window.BackgroundTransparency,
-		},
-		BlurRadius = 1, -- resolved px; Attributes.updateWindowBlur refreshes it once the window has a size
-		Paused = false,
-		LiquidParams = nil :: Liquid.LiquidParams?,
-		Geometry = nil :: Liquid.GeometryEntry?,
-		OutputResolution = Vector2.zero,
-		OutPixels = nil :: buffer?,
-		OutBlend = nil :: buffer?,
-		ReconJob = nil :: Liquid.ReconJob?,
-		ParallelJob = nil :: ParallelPending?,
-		ParallelId = 0,
-		MapsGeneration = 0,
-		FinishToken = nil :: {}?,
-		ForceRecon = false,
-		GridWritesSinceRecon = 0,
-		FramesSinceRecon = 0,
-		SamplesLastFrame = 0,
-		PendingLayout = false,
-		LastLayoutRequestClock = 0,
-		FirstLayoutRequestClock = 0,
-		LadderCap = math.huge,
-		UICornerConnection = nil :: RBXScriptConnection?,
-		Connections = {} :: { RBXScriptConnection },
-	}
-	GlassObject.byWindow[Window] = glassObject
-	return glassObject
-end
-
-return GlassObject
-end
-
-__axiomGlassFactories['Attributes'] = function()
-
-
-local Liquid = __axiomGlassRequire("Liquid")
-local Config = __axiomGlassRequire("Config")
-local GlassObject = __axiomGlassRequire("GlassObject")
-
-type GlassObject = GlassObject.GlassObject
-
-local function getNumberAttribute(Window: Instance, name: string): number?
-	local value = Window:GetAttribute(name)
-	return if type(value) == "number" then value else nil
-end
-
-local function clampedAttribute(Window: Instance, name: string, default: number, min: number, max: number): number
-	return math.clamp(getNumberAttribute(Window, name) or default, min, max)
-end
-
-local function getUDimAttribute(Window: Instance, name: string): UDim?
-	local value = Window:GetAttribute(name)
-	return if typeof(value) == "UDim" then value else nil
-end
-
-local function resolveUDim(value: UDim, minAxis: number): number
-	return value.Offset + value.Scale * minAxis
-end
-
-local Attributes = {}
-
-Attributes.getNumberAttribute = getNumberAttribute
-
-function Attributes.parseLiquidParams(glassObject: GlassObject, winW: number, winH: number): Liquid.LiquidParams
-	local Window = glassObject.Window
-	local minAxis = math.min(winW, winH)
-	local halfMinAxis = minAxis / 2
-
-	local function lengthAttribute(name: string, default: UDim, min: number, max: number): number
-		return math.clamp(resolveUDim(getUDimAttribute(Window, name) or default, minAxis), min, max)
-	end
-
-	local function percentAttribute(name: string, default: number, max: number): number
-		return clampedAttribute(Window, name, default, 0, max) / 100
-	end
-
-	local cornerRadius: number?
-	local cornerAttribute = getUDimAttribute(Window, "CornerRadius")
-	if cornerAttribute then
-		cornerRadius = resolveUDim(cornerAttribute, minAxis)
-	else
-		local uiCorner = Window:FindFirstChildWhichIsA("UICorner")
-		if uiCorner then
-			cornerRadius = resolveUDim(uiCorner.CornerRadius, minAxis)
-		end
-	end
-	local resolvedCornerRadius = cornerRadius or resolveUDim(Config.DEFAULT_CORNER_RADIUS, minAxis)
-
-	return {
-		cornerRadius = math.clamp(resolvedCornerRadius, 0, halfMinAxis),
-		superEllipseFactor = clampedAttribute(Window, "SuperEllipseFactor", Config.DEFAULT_SUPER_ELLIPSE_FACTOR, 2, 7),
-		thickness = lengthAttribute("Thickness", Config.DEFAULT_THICKNESS, 1, minAxis),
-		refractionFactor = clampedAttribute(Window, "RefractionFactor", Config.DEFAULT_REFRACTION_FACTOR, 1, 4),
-		chromaticAberration = clampedAttribute(
-			Window,
-			"ChromaticAberration",
-			Config.DEFAULT_CHROMATIC_ABERRATION,
-			0,
-			1
-		),
-		fresnelSize = lengthAttribute("FresnelSize", Config.DEFAULT_FRESNEL_SIZE, 0, minAxis),
-		fresnelHardness = percentAttribute("FresnelHardness", Config.DEFAULT_FRESNEL_HARDNESS, 100),
-		fresnelIntensity = percentAttribute("FresnelIntensity", Config.DEFAULT_FRESNEL_INTENSITY, 100),
-		glareSize = lengthAttribute("GlareSize", Config.DEFAULT_GLARE_SIZE, 0, minAxis),
-		glareHardness = percentAttribute("GlareHardness", Config.DEFAULT_GLARE_HARDNESS, 100),
-		glareIntensity = percentAttribute("GlareIntensity", Config.DEFAULT_GLARE_INTENSITY, 120),
-		glareConvergence = percentAttribute("GlareConvergence", Config.DEFAULT_GLARE_CONVERGENCE, 100),
-		glareOppositeSide = percentAttribute("GlareOppositeSide", Config.DEFAULT_GLARE_OPPOSITE_SIDE, 100),
-		glareAngle = math.rad(
-			math.clamp(getNumberAttribute(Window, "GlareAngle") or Config.DEFAULT_GLARE_ANGLE, -180, 180)
-		),
-		maxOutputResolution = math.round(
-			clampedAttribute(Window, "MaxOutputResolution", Config.DEFAULT_MAX_OUTPUT_RESOLUTION, 16, 1024)
-		),
-	}
-end
-
-function Attributes.updateWindowBlur(glassObject: GlassObject)
-	local Window = glassObject.Window
-	local radius = getUDimAttribute(Window, Config.BLUR_RADIUS_ATTRIBUTE_NAME) or Config.DEFAULT_BLUR_RADIUS
-	local absoluteSize = Window.AbsoluteSize
-	local minAxis = math.min(absoluteSize.X, absoluteSize.Y)
-	glassObject.BlurRadius = math.clamp(resolveUDim(radius, minAxis), 1, math.max(minAxis, 1))
-	glassObject.ForceRecon = true
-end
-
-return Attributes
-end
-
-__axiomGlassFactories['Layout'] = function()
-
-
-local Liquid = __axiomGlassRequire("Liquid")
-local Config = __axiomGlassRequire("Config")
-local Attributes = __axiomGlassRequire("Attributes")
-local GlassObject = __axiomGlassRequire("GlassObject")
-
-type GlassObject = GlassObject.GlassObject
-
-local Layout = {}
-
-function Layout.update(glassObject: GlassObject)
-	local Window = glassObject.Window
-	if not Window then
-		return
-	end
-	glassObject.PendingLayout = false
-
-	local absoluteSize = Window.AbsoluteSize
-	local winW, winH = math.round(absoluteSize.X), math.round(absoluteSize.Y)
-	if winW <= 0 or winH <= 0 then
-		return
-	end
-
-	Attributes.updateWindowBlur(glassObject)
-
-	local params = Attributes.parseLiquidParams(glassObject, winW, winH)
-	glassObject.LiquidParams = params
-
-	local outputCap = math.min(params.maxOutputResolution, glassObject.LadderCap)
-	local maxAxis = math.max(winW, winH)
-	local outputScale = maxAxis / math.min(outputCap, maxAxis)
-	local outW = math.max(math.floor(winW / outputScale + 0.5), 1)
-	local outH = math.max(math.floor(winH / outputScale + 0.5), 1)
-	local outputResolution = Vector2.new(outW, outH)
-
-	local samplerSize = Config.SAMPLING_CELL_SIZE
-	local gridW = math.max(winW // samplerSize, 1)
-	local gridH = math.max(winH // samplerSize, 1)
-	local gridResolution = Vector2.new(gridW, gridH)
-
-	local uniformWarp = Config.DEBUG_UNIFORM_WARP
-	local warpKey = Liquid.warpKey(gridW, gridH, winW, winH, params, Config.EDGE_DENSITY_BOOST)
-		.. (if uniformWarp then ":uniform" else "")
-	if warpKey ~= glassObject.WarpKey then
-		debug.profilebegin("GlassWarpBuild")
-		local gridPosX, warpLutX, gridPosY, warpLutY =
-			Liquid.buildWarp(gridW, gridH, winW, winH, params, Config.EDGE_DENSITY_BOOST, uniformWarp)
-		glassObject.GridPosX, glassObject.WarpLutX = gridPosX, warpLutX
-		glassObject.GridPosY, glassObject.WarpLutY = gridPosY, warpLutY
-		glassObject.WarpKey = warpKey
-		glassObject.MapsGeneration += 1
-		debug.profileend()
-	end
-
-	if gridResolution ~= glassObject.Resolution then
-		local pixelCount = gridW * gridH
-		local bufferLength = pixelCount * 4
-		local newPixels = buffer.create(bufferLength)
-		Liquid.resampleGridBilinear(
-			glassObject.Pixels,
-			glassObject.Resolution.X,
-			glassObject.Resolution.Y,
-			newPixels,
-			gridW,
-			gridH
-		)
-		glassObject.Pixels = newPixels
-		glassObject.Scratch = buffer.create(bufferLength)
-		glassObject.PixelCount = pixelCount
-		glassObject.Resolution = gridResolution
-		glassObject.ResolutionX = gridW
-		if glassObject.PixelIndex >= bufferLength then
-			glassObject.PixelIndex = 0
-		end
-	end
-
-	if outputResolution ~= glassObject.OutputResolution then
-		glassObject.OutPixels = buffer.create(outW * outH * 4)
-		glassObject.OutputResolution = outputResolution
-	end
-
-	local rawField = Config.DEBUG_RAW_DISTANCE_FIELD
-	local key = Liquid.geometryKey(winW, winH, outW, outH, params, rawField)
-	local geometry = glassObject.Geometry
-	if not geometry or geometry.Key ~= key then
-		if geometry then
-			Liquid.releaseGeometry(geometry)
-		end
-		glassObject.Geometry = Liquid.acquireGeometry(winW, winH, outW, outH, params, key, rawField)
-		glassObject.MapsGeneration += 1
-	end
-
-	glassObject.ReconJob = nil
-	glassObject.ParallelJob = nil
-	glassObject.FinishToken = nil
-	glassObject.ForceRecon = true
-end
-
-function Layout.request(glassObject: GlassObject)
-	if glassObject.Geometry then
-		if not glassObject.PendingLayout then
-			glassObject.PendingLayout = true
-			glassObject.FirstLayoutRequestClock = os.clock()
-		end
-		glassObject.LastLayoutRequestClock = os.clock()
-	else
-		Layout.update(glassObject)
-	end
-end
-
-function Layout.stepDownResolution(glassObject: GlassObject)
-	local refused = math.max(glassObject.OutputResolution.X, glassObject.OutputResolution.Y)
-	if refused > Config.MIN_OUTPUT_RESOLUTION then
-		glassObject.LadderCap = math.max(math.floor(refused / 2), Config.MIN_OUTPUT_RESOLUTION)
-		Layout.update(glassObject)
-	end
-end
-
-return Layout
-end
-
-__axiomGlassFactories['Sampler'] = function()
-
-
-local Dependencies = __axiomGlassRequire("Dependencies")
-local Config = __axiomGlassRequire("Config")
-local GlassObject = __axiomGlassRequire("GlassObject")
-
-type GlassObject = GlassObject.GlassObject
-
-local PixelColorApproximation = Dependencies.PixelColorApproximation
-
-local Sampler = {}
-
-function Sampler.processNextPixel(glassObject: GlassObject, skipTween: boolean?): boolean
-	if not glassObject.Parented then
-		return false
-	end
-
-	local Pixels, PixelIndex = glassObject.Pixels, glassObject.PixelIndex
-	local bufferLength = glassObject.PixelCount * 4
-
-	local gridPosX, gridPosY = glassObject.GridPosX, glassObject.GridPosY
-	if not gridPosX or not gridPosY then
-		return false
-	end
-
-	local resolutionX = glassObject.ResolutionX
-	local indexFloor4 = PixelIndex // 4
-	local xIndex = indexFloor4 % resolutionX
-	local rowOffset = (indexFloor4 // resolutionX) * 4
-	local posX = buffer.readf32(gridPosX, PixelIndex)
-	local posY = buffer.readf32(gridPosY, rowOffset)
-
-	local spacingX = math.max(
-		if xIndex > 0 then posX - buffer.readf32(gridPosX, PixelIndex - 4) else 0,
-		if xIndex < resolutionX - 1 then buffer.readf32(gridPosX, PixelIndex + 4) - posX else 0
-	)
-	local lastRowOffset = (glassObject.PixelCount // resolutionX - 1) * 4
-	local spacingY = math.max(
-		if rowOffset > 0 then posY - buffer.readf32(gridPosY, rowOffset - 4) else 0,
-		if rowOffset < lastRowOffset then buffer.readf32(gridPosY, rowOffset + 4) - posY else 0
-	)
-
-	local sampleR, sampleG, sampleB = PixelColorApproximation:GetColorXY(
-		posX + glassObject.WindowPositionX,
-		posY + glassObject.WindowPositionY,
-		glassObject.Pane,
-		math.max(spacingX, spacingY)
-	)
-
-	if skipTween then
-		buffer.writeu8(Pixels, PixelIndex, math.clamp(math.round(sampleR * 255), 0, 255))
-		buffer.writeu8(Pixels, PixelIndex + 1, math.clamp(math.round(sampleG * 255), 0, 255))
-		buffer.writeu8(Pixels, PixelIndex + 2, math.clamp(math.round(sampleB * 255), 0, 255))
-		glassObject.GridWritesSinceRecon += 1
-	else
-		local smoothing = Config.TEMPORAL_SMOOTHING
-		local prevR = buffer.readu8(Pixels, PixelIndex)
-		local prevG = buffer.readu8(Pixels, PixelIndex + 1)
-		local prevB = buffer.readu8(Pixels, PixelIndex + 2)
-		local newR = math.clamp(math.round(prevR + (sampleR * 255 - prevR) * smoothing), 0, 255)
-		local newG = math.clamp(math.round(prevG + (sampleG * 255 - prevG) * smoothing), 0, 255)
-		local newB = math.clamp(math.round(prevB + (sampleB * 255 - prevB) * smoothing), 0, 255)
-		if newR ~= prevR or newG ~= prevG or newB ~= prevB then
-			buffer.writeu8(Pixels, PixelIndex, newR)
-			buffer.writeu8(Pixels, PixelIndex + 1, newG)
-			buffer.writeu8(Pixels, PixelIndex + 2, newB)
-			glassObject.GridWritesSinceRecon += 1
-		end
-	end
-
-	PixelIndex += 4
-	if PixelIndex >= bufferLength then
-		PixelIndex = 0
-	end
-
-	glassObject.PixelIndex = PixelIndex
-	return true
-end
-
-return Sampler
-end
-
-__axiomGlassFactories['Frost'] = function()
-
-
-local Liquid = __axiomGlassRequire("Liquid")
-local Config = __axiomGlassRequire("Config")
-
-export type BlurFunction = ({
-	pixelBuffer: buffer,
-	width: number,
-	height: number,
-	blurRadius: number,
-}) -> ()
-
-local function levelVariance(level: number): number
-	return (level + 1) * (3 * level + 4) / 3
-end
-
-local function exactLevel(variance: number): number
-	return (math.sqrt(1 + 36 * variance) - 7) / 6
-end
-
-local function levelBelow(variance: number): number
-	return math.floor(exactLevel(variance))
-end
-
-local function levelAbove(variance: number): number
-	return math.max(math.ceil(exactLevel(variance)), 0)
-end
-
-local function levelSigma(level: number): number
-	return math.sqrt((2 * level + 2) ^ 2 - 1) / 2
-end
-
-local function ensureBuffer(existing: buffer?, length: number): buffer
-	return if existing and buffer.len(existing) == length then existing else buffer.create(length)
-end
-
-local Frost = {}
-
-function Frost.apply(job: Liquid.ReconJob, blur: BlurFunction, blendScratch: buffer?): buffer?
-	local outPixels = job.Out
-	local outW, outH = job.OutW, job.OutH
-	local sigma = job.BlurSigma
-	if sigma < Config.MIN_BLUR_SIGMA then
-		return blendScratch
-	end
-
-	local length = buffer.len(outPixels)
-
-	local premultiplied = not Config.DEBUG_FROST_NO_PREMULTIPLY
-	if premultiplied then
-		debug.profilebegin("GlassFrostPremul")
-		for i = 0, length - 4, 4 do
-			local alpha = buffer.readu8(outPixels, i + 3)
-			if alpha == 0 then
-				buffer.writeu32(outPixels, i, 0)
-			elseif alpha < 255 then
-				local scale = alpha / 255
-				buffer.writeu8(outPixels, i, (buffer.readu8(outPixels, i) * scale + 0.5) // 1)
-				buffer.writeu8(outPixels, i + 1, (buffer.readu8(outPixels, i + 1) * scale + 0.5) // 1)
-				buffer.writeu8(outPixels, i + 2, (buffer.readu8(outPixels, i + 2) * scale + 0.5) // 1)
-			end
-		end
-		debug.profileend()
-	end
-
-	if Config.DEBUG_FROST_NEAREST_LEVEL then
-		blur({
-			pixelBuffer = outPixels,
-			width = outW,
-			height = outH,
-			blurRadius = sigma,
-		})
-	else
-		local variance = sigma * sigma
-		local baseLevel = levelBelow(variance)
-		local residual = variance
-		if baseLevel >= 0 then
-			residual -= levelVariance(baseLevel)
-			blur({
-				pixelBuffer = outPixels,
-				width = outW,
-				height = outH,
-				blurRadius = levelSigma(baseLevel),
-			})
-		end
-		if residual > 1e-3 then
-			local topLevel = levelAbove(residual)
-			local blendWeight = math.min(residual / levelVariance(topLevel), 1)
-			local base = ensureBuffer(blendScratch, length)
-			blendScratch = base
-			buffer.copy(base, 0, outPixels)
-			blur({
-				pixelBuffer = outPixels,
-				width = outW,
-				height = outH,
-				blurRadius = levelSigma(topLevel),
-			})
-			debug.profilebegin("GlassFrostMix")
-			for i = 0, length - 1 do
-				local baseByte = buffer.readu8(base, i)
-				buffer.writeu8(
-					outPixels,
-					i,
-					(baseByte + (buffer.readu8(outPixels, i) - baseByte) * blendWeight + 0.5) // 1
-				)
-			end
-			debug.profileend()
-		end
-	end
-
-	local aux = job.Aux
-	local clearColor = Liquid.clearColor(job.TintR, job.TintG, job.TintB)
-	debug.profilebegin("GlassFrostNormalize")
-	for i = 0, length - 4, 4 do
-		local maskAlpha = buffer.readu8(aux, i + 2)
-		if maskAlpha == 0 then
-			buffer.writeu32(outPixels, i, clearColor)
-		elseif premultiplied then
-			local coverage = buffer.readu8(outPixels, i + 3)
-			local scale = if coverage > 0 then 255 / coverage else 0
-			for channel = i, i + 2 do
-				buffer.writeu8(
-					outPixels,
-					channel,
-					math.min((buffer.readu8(outPixels, channel) * scale + 0.5) // 1, 255)
-				)
-			end
-			buffer.writeu8(outPixels, i + 3, maskAlpha)
-		else
-			buffer.writeu8(outPixels, i + 3, maskAlpha)
-		end
-	end
-	debug.profileend()
-
-	return blendScratch
-end
-
-return Frost
-end
-
-__axiomGlassFactories['Composite'] = function()
-
-
-local Liquid = __axiomGlassRequire("Liquid")
-local Frost = __axiomGlassRequire("Frost")
-
-local Composite = {}
-
-function Composite.run(job: Liquid.ReconJob, blur: Frost.BlurFunction, blendScratch: buffer?): buffer?
-	if job.TintAlpha < 1 then
-		blendScratch = Frost.apply(job, blur, blendScratch)
-	end
-	if job.RimEnabled then
-		debug.profilebegin("GlassRim")
-		Liquid.compositeRim(job.Out, job.Aux, job.OutW * job.OutH, job.FresnelIntensity)
-		debug.profileend()
-	end
-	return blendScratch
-end
-
-return Composite
-end
-
-__axiomGlassFactories['Parallel'] = function()
-local Parallel = {}
-function Parallel.shouldUse()
-    return false
-end
-function Parallel.scatter()
-    return nil
-end
-function Parallel.poll()
-    return "failed"
-end
-function Parallel.forget()
-end
-return Parallel
-end
-
-__axiomGlassFactories['Recon'] = function()
-
-
-local AssetService = game:GetService("AssetService")
-
-local Liquid = __axiomGlassRequire("Liquid")
-local Config = __axiomGlassRequire("Config")
-local Composite = __axiomGlassRequire("Composite")
-local Dependencies = __axiomGlassRequire("Dependencies")
-local Layout = __axiomGlassRequire("Layout")
-local Parallel = __axiomGlassRequire("Parallel")
-local GlassObject = __axiomGlassRequire("GlassObject")
-
-type GlassObject = GlassObject.GlassObject
-
-local EditableImageBlur = Dependencies.EditableImageBlur
-
-local function ensureEditableImage(glassObject: GlassObject, resolution: Vector2): EditableImage?
-	local existing = glassObject.EditableImage
-	if existing and existing.Size == resolution then
-		return existing
-	end
-
-	local function tryCreate()
-		return pcall(AssetService.CreateEditableImage, AssetService, {
-			Size = resolution,
-		})
-	end
-	local success, editableImage = tryCreate()
-	if (not success or not editableImage) and existing then
-		existing:Destroy()
-		glassObject.EditableImage = nil
-		existing = nil
-		success, editableImage = tryCreate()
-	end
-	if not success or not editableImage then
-		if not glassObject.WarnedImageCreateFailure then
-			glassObject.WarnedImageCreateFailure = true
-			warn(
-				"GlassmorphicUI could not create an EditableImage:",
-				if success then "budget exhausted" else editableImage
-			)
-		end
-		return nil
-	end
-	glassObject.WarnedImageCreateFailure = false
-
-	if existing then
-		existing:Destroy()
-	end
-	glassObject.EditableImage = editableImage
-	glassObject.Pane.ImageContent = Content.fromObject(editableImage)
-
-	return editableImage
-end
-
-local function makeJob(glassObject: GlassObject, grid: buffer): Liquid.ReconJob?
-	local geometry = glassObject.Geometry
-	local params = glassObject.LiquidParams
-	local outPixels = glassObject.OutPixels
-	local warpLutX, warpLutY = glassObject.WarpLutX, glassObject.WarpLutY
-	if not geometry or not geometry.Ready or not params or not outPixels or not warpLutX or not warpLutY then
-		return nil
-	end
-
-	local resolution = glassObject.Resolution
-	local WindowColor = glassObject.WindowColor
-	local outW, outH = glassObject.OutputResolution.X, glassObject.OutputResolution.Y
-	local redScale, blueScale = Liquid.dispersionScales(params.chromaticAberration)
-	return {
-		Out = outPixels,
-		Disp = geometry.DispMap,
-		Aux = geometry.AuxMap,
-		Grid = grid,
-		GridW = resolution.X,
-		GridH = resolution.Y,
-		OutW = outW,
-		OutH = outH,
-		StepX = geometry.StepX,
-		StepY = geometry.StepY,
-		WarpX = warpLutX,
-		WarpY = warpLutY,
-		TintR = WindowColor[1],
-		TintG = WindowColor[2],
-		TintB = WindowColor[3],
-		TintAlpha = WindowColor[4],
-		RedScale = redScale,
-		BlueScale = blueScale,
-		BlurSigma = math.min((glassObject.BlurRadius / 3) / geometry.StepX, math.max(outW, outH) / 2),
-		FresnelIntensity = params.fresnelIntensity,
-		RimEnabled = (params.fresnelSize > 0 and params.fresnelIntensity > 0)
-			or (params.glareSize > 0 and params.glareIntensity > 0),
-		BilinearFetch = Config.DEBUG_BILINEAR_FETCH,
-		Row = 0,
-		RowEnd = outH,
-	}
-end
-
-local function startRecon(glassObject: GlassObject): boolean
-	local job = makeJob(glassObject, glassObject.Scratch)
-	if not job then
-		return false
-	end
-	if not GlassObject.isOpaque(glassObject) then
-		debug.profilebegin("GlassSnapshot")
-		buffer.copy(glassObject.Scratch, 0, glassObject.Pixels)
-		debug.profileend()
-	end
-	glassObject.ReconJob = job
-	glassObject.ForceRecon = false
-	glassObject.GridWritesSinceRecon = 0
-	glassObject.FramesSinceRecon = 0
-
-	if Config.DEBUG_SAMPLING_HEATMAP then
-		Liquid.renderDensityHeatmap(job)
-	elseif Config.DEBUG_OVERLAY == "grid-view" or Config.DEBUG_OVERLAY == "grid-view-flat" then
-		Liquid.renderGridView(job, glassObject.PixelIndex // 4, Config.DEBUG_OVERLAY == "grid-view")
-	end
-	if Config.DEBUG_OVERLAY == "grid-view" or Config.DEBUG_OVERLAY == "melt-contours" then
-		glassObject.ForceRecon = true
-	end
-	return true
-end
-
-local function upload(glassObject: GlassObject, outPixels: buffer)
-	debug.profilebegin("GlassUpload")
-	local editableImage = ensureEditableImage(glassObject, glassObject.OutputResolution)
-	if editableImage then
-		editableImage:WritePixelsBuffer(Vector2.zero, glassObject.OutputResolution, outPixels)
-	else
-		Layout.stepDownResolution(glassObject)
-		glassObject.ForceRecon = true
-	end
-	debug.profileend()
-end
-
-local function applyDebugOverlay(glassObject: GlassObject, job: Liquid.ReconJob)
-	local overlay = Config.DEBUG_OVERLAY
-	local params = glassObject.LiquidParams
-	if not overlay or not params then
-		return
-	end
-	if overlay == "sdf-contours" or overlay == "melt-contours" then
-		Liquid.drawContourOverlay(job, params, overlay == "melt-contours")
-	elseif overlay == "normals" then
-		Liquid.drawNormalOverlay(job, params, Config.DEBUG_RAW_DISTANCE_FIELD)
-	elseif overlay == "cell-centers" or overlay == "cell-centers-uniform" then
-		local gridPosX, gridPosY = glassObject.GridPosX, glassObject.GridPosY
-		if gridPosX and gridPosY then
-			Liquid.drawCellCenterOverlay(job, gridPosX, gridPosY, overlay == "cell-centers-uniform")
-		end
-	end
-end
-
-local function finishRecon(glassObject: GlassObject, job: Liquid.ReconJob)
-	glassObject.ReconJob = nil
-	if
-		not (
-			Config.DEBUG_SAMPLING_HEATMAP
-			or Config.DEBUG_OVERLAY == "grid-view"
-			or Config.DEBUG_OVERLAY == "grid-view-flat"
-		)
-	then
-		glassObject.OutBlend = Composite.run(job, EditableImageBlur.Blur, glassObject.OutBlend)
-		applyDebugOverlay(glassObject, job)
-	end
-	upload(glassObject, job.Out)
-end
-
-local function blurOnPool(config: { pixelBuffer: buffer, width: number, height: number, blurRadius: number })
-	EditableImageBlur.BlurAsync({
-		pixelBuffer = config.pixelBuffer,
-		width = config.width,
-		height = config.height,
-		blurRadius = config.blurRadius,
-		workerCount = Config.FROST_WORKER_COUNT,
-	})
-end
-
-local function finishParallel(glassObject: GlassObject, job: Liquid.ReconJob)
-	local token = {}
-	glassObject.FinishToken = token
-	task.spawn(function()
-		local blendScratch = Composite.run(job, blurOnPool, glassObject.OutBlend)
-		if glassObject.FinishToken ~= token then
-			return
-		end
-		glassObject.OutBlend = blendScratch
-		glassObject.FinishToken = nil
-		upload(glassObject, job.Out)
-	end)
-end
-
-local Recon = {}
-
-function Recon.advance(glassObject: GlassObject, deadline: number, startIfIdle: boolean)
-	if glassObject.FinishToken then
-		return
-	end
-
-	local pending = glassObject.ParallelJob
-	if pending then
-		debug.profilebegin("GlassGather")
-		local status = Parallel.poll(glassObject, pending)
-		debug.profileend()
-		if status == "pending" then
-			return
-		end
-		glassObject.ParallelJob = nil
-		if status == "done" then
-			finishParallel(glassObject, pending.Job)
-		else
-			glassObject.ForceRecon = true
-		end
-		return
-	end
-
-	local job = glassObject.ReconJob
-	if not job then
-		if not startIfIdle then
-			return
-		end
-		if deadline ~= math.huge and Parallel.shouldUse(glassObject) then
-			local parallelJob = makeJob(glassObject, glassObject.Pixels)
-			if parallelJob then
-				debug.profilebegin("GlassScatter")
-				local newPending = Parallel.scatter(glassObject, parallelJob)
-				debug.profileend()
-				if newPending then
-					glassObject.ParallelJob = newPending
-					glassObject.ForceRecon = false
-					glassObject.GridWritesSinceRecon = 0
-					glassObject.FramesSinceRecon = 0
-					return
-				end
-			end
-		end
-		if not startRecon(glassObject) then
-			return
-		end
-		job = glassObject.ReconJob
-	end
-	if job then
-		debug.profilebegin("GlassReconstruct")
-		local completed = Liquid.reconstructRows(job, deadline)
-		debug.profileend()
-		if completed then
-			finishRecon(glassObject, job)
-		end
-	end
-end
-
-return Recon
-end
-
-__axiomGlassFactories['Scheduler'] = function()
-
-
-local Liquid = __axiomGlassRequire("Liquid")
-local Config = __axiomGlassRequire("Config")
-local GlassObject = __axiomGlassRequire("GlassObject")
-local Sampler = __axiomGlassRequire("Sampler")
-local Layout = __axiomGlassRequire("Layout")
-local Recon = __axiomGlassRequire("Recon")
-
-type GlassObject = GlassObject.GlassObject
-
-local glassObjectUpdateIndex = 1
-local liquidUpdateIndex = 1
-
-local Scheduler = {}
-
-function Scheduler.totalUpdate(glassObject: GlassObject)
-	debug.profilebegin("GlassTotalUpdate")
-	Layout.update(glassObject)
-	local geometry = glassObject.Geometry
-	if geometry and not geometry.Ready then
-		Liquid.stepGeometry(geometry, math.huge)
-		glassObject.ForceRecon = true
-	end
-
-	if not GlassObject.isOpaque(glassObject) then
-		local startPixel = glassObject.PixelIndex
-		while Sampler.processNextPixel(glassObject, true) do
-			if glassObject.PixelIndex == startPixel then
-				break
-			end
-		end
-	end
-
-	glassObject.ReconJob = nil
-	glassObject.ParallelJob = nil
-	glassObject.FinishToken = nil
-	Recon.advance(glassObject, math.huge, true)
-	debug.profileend()
-end
-
-local function stepLiquid(glassObject: GlassObject, deadline: number)
-	glassObject.FramesSinceRecon += 1
-
-	if glassObject.PendingLayout then
-		local now = os.clock()
-		if
-			now - glassObject.LastLayoutRequestClock >= Config.RESIZE_DEBOUNCE
-			or now - glassObject.FirstLayoutRequestClock >= Config.RESIZE_MAX_WAIT
-		then
-			Layout.update(glassObject)
-		end
-	end
-
-	local geometry = glassObject.Geometry
-	if not geometry then
-		return
-	end
-	if not geometry.Ready then
-		debug.profilebegin("GlassGeometry")
-		local geometryReady = Liquid.stepGeometry(geometry, deadline)
-		debug.profileend()
-		if geometryReady then
-			glassObject.ForceRecon = true
-		else
-			return
-		end
-	end
-
-	Recon.advance(glassObject, deadline, glassObject.ForceRecon or glassObject.GridWritesSinceRecon > 0)
-end
-
-function Scheduler.update()
-	local glassObjects = GlassObject.list
-	local totalGlassObjects = #glassObjects
-	if totalGlassObjects == 0 then
-		return
-	end
-
-	local sampleDeadline = os.clock() + Config.SAMPLE_TIME_BUDGET
-	local updateIndex = glassObjectUpdateIndex
-	local idleStreak = 0
-	local frameStartIndex: { [GlassObject]: number } = {}
-	local refreshed: { [GlassObject]: boolean } = {}
-	local sampleCounts: { [GlassObject]: number } = {}
-	debug.profilebegin("GlassSampling")
-	while os.clock() < sampleDeadline do
-		local glassObject = glassObjects[updateIndex]
-		local progressed = false
-		if glassObject and not refreshed[glassObject] and not GlassObject.isOpaque(glassObject) then
-			if frameStartIndex[glassObject] == nil then
-				frameStartIndex[glassObject] = glassObject.PixelIndex
-			end
-			progressed = Sampler.processNextPixel(glassObject, false)
-			if progressed then
-				sampleCounts[glassObject] = (sampleCounts[glassObject] or 0) + 1
-				if glassObject.PixelIndex == frameStartIndex[glassObject] then
-					refreshed[glassObject] = true
-				end
-			end
-		end
-		if progressed then
-			idleStreak = 0
-		else
-			idleStreak += 1
-			if idleStreak >= totalGlassObjects then
-				break
-			end
-		end
-		updateIndex += 1
-
-		if updateIndex > totalGlassObjects then
-			updateIndex = 1
-		end
-	end
-	debug.profileend()
-	glassObjectUpdateIndex = updateIndex
-
-	for _, glassObject in glassObjects do
-		glassObject.SamplesLastFrame = sampleCounts[glassObject] or 0
-	end
-
-	debug.profilebegin("GlassLiquid")
-	local liquidDeadline = os.clock() + Config.LIQUID_TIME_BUDGET
-	local liquidIndex = liquidUpdateIndex
-	for _ = 1, totalGlassObjects do
-		if liquidIndex > totalGlassObjects then
-			liquidIndex = 1
-		end
-		local glassObject = glassObjects[liquidIndex]
-		liquidIndex += 1
-		if glassObject then
-			stepLiquid(glassObject, liquidDeadline)
-		end
-		if os.clock() >= liquidDeadline then
-			break
-		end
-	end
-	debug.profileend()
-	liquidUpdateIndex = liquidIndex
-end
-
-return Scheduler
-end
-
-__axiomGlassFactories['Window'] = function()
-
-
-local Liquid = __axiomGlassRequire("Liquid")
-local Config = __axiomGlassRequire("Config")
-local GlassObject = __axiomGlassRequire("GlassObject")
-local Attributes = __axiomGlassRequire("Attributes")
-local Layout = __axiomGlassRequire("Layout")
-local Scheduler = __axiomGlassRequire("Scheduler")
-local Parallel = __axiomGlassRequire("Parallel")
-
-type GlassObject = GlassObject.GlassObject
-
-local Window = {}
-
-local function initializeWindow(glassObject: GlassObject)
-	local window = glassObject.Window
-	if not window or glassObject.Initialized then
-		return
-	end
-	glassObject.Initialized = true
-
-	if window:GetAttribute(Config.TRANSPARENCY_ATTRIBUTE_NAME) == nil then
-		window:SetAttribute(Config.TRANSPARENCY_ATTRIBUTE_NAME, window.BackgroundTransparency)
-	end
-	window.BackgroundTransparency = 1
-	Window.bindUICorner(glassObject)
-end
-
-local function onInitialParented(Object: GuiObject, callback: () -> nil)
-	if Object:IsDescendantOf(game) then
-		task.spawn(callback)
-	else
-		local initializeConnection
-		initializeConnection = Object.AncestryChanged:Connect(function()
-			if not Object:IsDescendantOf(game) then
-				return
-			end
-
-			initializeConnection:Disconnect()
-
-			if
-				Object.Size.X.Offset == 0
-				and Object.Size.Y.Offset == 0
-				and Object.Size.X.Scale == 0
-				and Object.Size.Y.Scale == 0
-			then
-				task.wait()
-			else
-				local destroyed = false
-				local destroyingConnection = Object.Destroying:Connect(function()
-					destroyed = true
-				end)
-				local absoluteSize = Object.AbsoluteSize
-				while task.wait() do
-					if destroyed then
-						return
-					end
-					if absoluteSize.X ~= 0 or absoluteSize.Y ~= 0 then
-						break
-					end
-					absoluteSize = Object.AbsoluteSize
-				end
-				destroyingConnection:Disconnect()
-			end
-
-			callback()
-		end)
-	end
-end
-
-local function updateWindowPosition(glassObject: GlassObject)
-	local window = glassObject.Window
-	local absolutePosition = window.AbsolutePosition
-	glassObject.WindowPositionX = absolutePosition.X
-	glassObject.WindowPositionY = absolutePosition.Y
-end
-
-local function updateWindowColor(glassObject: GlassObject)
-	local window = glassObject.Window
-	if not window then
-		return
-	end
-	local tintTransparency = Attributes.getNumberAttribute(window, Config.TRANSPARENCY_ATTRIBUTE_NAME)
-		or 1 - glassObject.WindowColor[4]
-	local windowColor = window.BackgroundColor3
-	glassObject.WindowColor[1] = windowColor.R
-	glassObject.WindowColor[2] = windowColor.G
-	glassObject.WindowColor[3] = windowColor.B
-	glassObject.WindowColor[4] = 1 - math.clamp(tintTransparency, 0, 1)
-	glassObject.ForceRecon = true
-end
-
-local function updateWindowSize(glassObject: GlassObject)
-	local absoluteSize = glassObject.Window.AbsoluteSize
-	if absoluteSize.X == 0 or absoluteSize.Y == 0 then
-		return
-	end
-	Layout.request(glassObject)
-end
-
-function Window.bindUICorner(glassObject: GlassObject)
-	if glassObject.UICornerConnection then
-		glassObject.UICornerConnection:Disconnect()
-		glassObject.UICornerConnection = nil
-	end
-	local window = glassObject.Window
-	if not window then
-		return
-	end
-	local uiCorner = window:FindFirstChildWhichIsA("UICorner")
-	if uiCorner then
-		glassObject.UICornerConnection = uiCorner:GetPropertyChangedSignal("CornerRadius"):Connect(function()
-			Layout.request(glassObject)
-		end)
-	end
-end
-
-local function watchProperties(glassObject: GlassObject)
-	local window = glassObject.Window
-	local connections = glassObject.Connections
-
-	table.insert(
-		connections,
-		window.AncestryChanged:Connect(function()
-			glassObject.Parented = window.Parent ~= nil
-		end)
-	)
-	table.insert(
-		connections,
-		window:GetPropertyChangedSignal("AbsolutePosition"):Connect(function()
-			updateWindowPosition(glassObject)
-		end)
-	)
-	table.insert(
-		connections,
-		window:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
-			updateWindowSize(glassObject)
-		end)
-	)
-	table.insert(
-		connections,
-		window:GetPropertyChangedSignal("BackgroundColor3"):Connect(function()
-			updateWindowColor(glassObject)
-		end)
-	)
-	table.insert(
-		connections,
-		window:GetPropertyChangedSignal("BackgroundTransparency"):Connect(function()
-			if glassObject.Initialized and window.BackgroundTransparency ~= 1 then
-				window.BackgroundTransparency = 1
-			end
-		end)
-	)
-	table.insert(
-		connections,
-		window:GetAttributeChangedSignal(Config.BLUR_RADIUS_ATTRIBUTE_NAME):Connect(function()
-			Attributes.updateWindowBlur(glassObject)
-		end)
-	)
-	table.insert(
-		connections,
-		window:GetAttributeChangedSignal(Config.TRANSPARENCY_ATTRIBUTE_NAME):Connect(function()
-			updateWindowColor(glassObject)
-		end)
-	)
-	for _, attributeName in Config.LIQUID_PARAM_ATTRIBUTES do
-		table.insert(
-			connections,
-			window:GetAttributeChangedSignal(attributeName):Connect(function()
-				if attributeName == "MaxOutputResolution" then
-					glassObject.LadderCap = math.huge
-				end
-				if glassObject.Initialized then
-					Layout.request(glassObject)
-				end
-			end)
-		)
-	end
-	local function onChildChanged(child: Instance)
-		if child:IsA("UICorner") and glassObject.Initialized then
-			Window.bindUICorner(glassObject)
-			Layout.request(glassObject)
-		end
-	end
-	table.insert(connections, window.ChildAdded:Connect(onChildChanged))
-	table.insert(connections, window.ChildRemoved:Connect(onChildChanged))
-end
-
-function Window.setup(guiObject: GuiObject)
-	if GlassObject.byWindow[guiObject] then
-		return guiObject
-	end
-
-	local glassObject = GlassObject.create(guiObject)
-	watchProperties(glassObject)
-
-	table.insert(
-		glassObject.Connections,
-		guiObject.Destroying:Connect(function()
-			Window.removeInstance(guiObject)
-		end)
-	)
-
-	onInitialParented(guiObject, function()
-		initializeWindow(glassObject)
-		updateWindowColor(glassObject)
-		updateWindowPosition(glassObject)
-		updateWindowSize(glassObject)
-		Attributes.updateWindowBlur(glassObject)
-
-		Scheduler.totalUpdate(glassObject)
-
-		if not glassObject.Paused then
-			GlassObject.addToUpdateList(glassObject)
-		end
-	end)
-
-	return guiObject
-end
-
-function Window.addInstance(instance: Instance)
-	if instance:IsA("GuiObject") then
-		Window.setup(instance)
-	end
-end
-
-function Window.removeInstance(instance: Instance)
-	if instance:IsA("GuiObject") then
-		local glassObject = GlassObject.byWindow[instance]
-		if glassObject then
-			GlassObject.byWindow[instance] = nil
-			GlassObject.removeFromUpdateList(glassObject)
-
-			for _, connection in glassObject.Connections do
-				connection:Disconnect()
-			end
-			if glassObject.UICornerConnection then
-				glassObject.UICornerConnection:Disconnect()
-			end
-			if glassObject.Geometry then
-				Liquid.releaseGeometry(glassObject.Geometry)
-			end
-			if glassObject.EditableImage then
-				glassObject.EditableImage:Destroy()
-			end
-			Parallel.forget(glassObject)
-			glassObject.FinishToken = nil
-			glassObject.Pane:Destroy()
-
-			table.clear(glassObject)
-			table.freeze(glassObject)
-		end
-	end
-end
-
-return Window
-end
-
-__axiomGlassFactories['init'] = function()
-
-
-local RunService = game:GetService("RunService")
-local CollectionService = game:GetService("CollectionService")
-
-local Config = __axiomGlassRequire("Config")
-local GlassObject = __axiomGlassRequire("GlassObject")
-local Scheduler = __axiomGlassRequire("Scheduler")
-local Window = __axiomGlassRequire("Window")
-
-local GlassmorphicUI = {}
-
-export type DebugStats = {
-	GridResolution: Vector2, -- source-grid cells per axis
-	OutputResolution: Vector2, -- output image px per axis
-	SamplesLastFrame: number, -- backdrop samples this window got last frame
-	GridWritesSinceRecon: number, -- grid cells actually changed since the last pass started
-	FramesSinceRecon: number,
-	ReconRoute: "parallel" | "sync" | "idle", -- what the current reconstruction pass runs on
-}
-
-function GlassmorphicUI.new(): Frame
-	local window = Instance.new("Frame")
-	window.Size = UDim2.fromOffset(200, 200)
-	window.BackgroundColor3 = Color3.fromRGB(200, 220, 245)
-	window.BorderSizePixel = 0
-	window.BackgroundTransparency = 1
-	window.Name = "GlassmorphicUI"
-	window:AddTag(Config.TAG_NAME)
-
-	Window.setup(window)
-
-	return window
-end
-
-function GlassmorphicUI.setDefaultBlurRadius(radius: UDim)
-	if typeof(radius) ~= "UDim" then
-		return
-	end
-	Config.DEFAULT_BLUR_RADIUS = radius
-end
-
-function GlassmorphicUI.applyGlassToImageLabel(ImageLabel: ImageLabel)
-	if typeof(ImageLabel) == "Instance" and ImageLabel:IsA("GuiObject") then
-		GlassmorphicUI.addGlassBackground(ImageLabel)
-	end
-end
-
-function GlassmorphicUI.addGlassBackground(GuiObject: GuiObject): GuiObject
-	if typeof(GuiObject) ~= "Instance" or not GuiObject:IsA("GuiObject") then
-		error("Expected GuiObject, got " .. typeof(GuiObject))
-	end
-	GuiObject:AddTag(Config.TAG_NAME)
-	return GuiObject
-end
-
-function GlassmorphicUI.forceUpdate(window: GuiObject): GuiObject
-	local glassObject = GlassObject.byWindow[window]
-	if glassObject then
-		Scheduler.totalUpdate(glassObject)
-	end
-	return window
-end
-
-function GlassmorphicUI.getDebugStats(window: GuiObject): DebugStats?
-	local glassObject = GlassObject.byWindow[window]
-	if not glassObject then
-		return nil
-	end
-	return {
-		GridResolution = glassObject.Resolution,
-		OutputResolution = glassObject.OutputResolution,
-		SamplesLastFrame = glassObject.SamplesLastFrame,
-		GridWritesSinceRecon = glassObject.GridWritesSinceRecon,
-		FramesSinceRecon = glassObject.FramesSinceRecon,
-		ReconRoute = if glassObject.ParallelJob then "parallel" elseif glassObject.ReconJob then "sync" else "idle",
-	} :: DebugStats
-end
-
-function GlassmorphicUI.pauseUpdates(window: GuiObject): GuiObject
-	local glassObject = GlassObject.byWindow[window]
-	if glassObject then
-		glassObject.Paused = true
-		GlassObject.removeFromUpdateList(glassObject)
-	end
-	return window
-end
-
-function GlassmorphicUI.resumeUpdates(window: GuiObject): GuiObject
-	local glassObject = GlassObject.byWindow[window]
-	if glassObject then
-		glassObject.Paused = false
-		GlassObject.addToUpdateList(glassObject)
-	end
-	return window
-end
-
-CollectionService:GetInstanceRemovedSignal(Config.TAG_NAME):Connect(Window.removeInstance)
-CollectionService:GetInstanceAddedSignal(Config.TAG_NAME):Connect(Window.addInstance)
-for _, tagged in CollectionService:GetTagged(Config.TAG_NAME) do
-	Window.addInstance(tagged)
-end
-
-RunService.Heartbeat:Connect(function()
-	Scheduler.update()
-end)
-
-GlassmorphicUI.DEFAULT_CORNER_RADIUS = Config.DEFAULT_CORNER_RADIUS
-GlassmorphicUI.DEFAULT_SUPER_ELLIPSE_FACTOR = Config.DEFAULT_SUPER_ELLIPSE_FACTOR
-GlassmorphicUI.DEFAULT_THICKNESS = Config.DEFAULT_THICKNESS
-GlassmorphicUI.DEFAULT_REFRACTION_FACTOR = Config.DEFAULT_REFRACTION_FACTOR
-GlassmorphicUI.DEFAULT_CHROMATIC_ABERRATION = Config.DEFAULT_CHROMATIC_ABERRATION
-GlassmorphicUI.DEFAULT_FRESNEL_SIZE = Config.DEFAULT_FRESNEL_SIZE
-GlassmorphicUI.DEFAULT_FRESNEL_HARDNESS = Config.DEFAULT_FRESNEL_HARDNESS
-GlassmorphicUI.DEFAULT_FRESNEL_INTENSITY = Config.DEFAULT_FRESNEL_INTENSITY
-GlassmorphicUI.DEFAULT_GLARE_SIZE = Config.DEFAULT_GLARE_SIZE
-GlassmorphicUI.DEFAULT_GLARE_HARDNESS = Config.DEFAULT_GLARE_HARDNESS
-GlassmorphicUI.DEFAULT_GLARE_INTENSITY = Config.DEFAULT_GLARE_INTENSITY
-GlassmorphicUI.DEFAULT_GLARE_CONVERGENCE = Config.DEFAULT_GLARE_CONVERGENCE
-GlassmorphicUI.DEFAULT_GLARE_OPPOSITE_SIDE = Config.DEFAULT_GLARE_OPPOSITE_SIDE
-GlassmorphicUI.DEFAULT_GLARE_ANGLE = Config.DEFAULT_GLARE_ANGLE
-GlassmorphicUI.DEFAULT_BLUR_RADIUS = Config.DEFAULT_BLUR_RADIUS
-GlassmorphicUI.DEFAULT_MAX_OUTPUT_RESOLUTION = Config.DEFAULT_MAX_OUTPUT_RESOLUTION
-
-return table.freeze(GlassmorphicUI)
-end
-
 local TS = game:GetService("TweenService")
 local UIS = game:GetService("UserInputService")
 local CAS = game:GetService("ContextActionService")
@@ -3363,7 +165,8 @@ local THEME = {
 	ElementStyle = 1,
 	TopbarAlign = "Right",
 	MainOutlineEnabled = false,
-	CloseAnimation = 1
+	CloseAnimation = 1,
+	BackgroundEffect = "Constellation"
 }
 
 local function ApplyTheme(obj, themeKey, prop)
@@ -3514,29 +317,6 @@ function Library.CreateWindow(arg1, arg2)
 	local isInitiallyCollapsed = (config.Collapsed == true) or (config.SidebarCollapsed == true)
 	local notifPosition = config.NotificationPosition or "BottomRight"
 	local configFolder = config.ConfigFolder or "AxiomConfigs"
-	local motionConfig = config.Motion ~= false
-	local motionDuration = math.clamp(tonumber(config.MotionDuration) or 0.24, 0.05, 1.5)
-	local glassConfig = config.GlassMode == true
-	local glassModule = config.GlassModule
-	local glassModuleErrorShown = false
-	local function loadEmbeddedGlass()
-		if glassModule then return glassModule end
-		local ok, result = pcall(__axiomGlassRequire, "init")
-		if ok then
-			glassModule = result
-		elseif not glassModuleErrorShown then
-			glassModuleErrorShown = true
-			warn("AxiomUI: embedded GlassmorphicUI could not start:", result)
-		end
-		return glassModule
-	end
-	if glassConfig then loadEmbeddedGlass() end
-	local glassAttached = {}
-	local glassBudget = math.clamp(tonumber(config.GlassSurfaceBudget) or (isMobile and 2 or 5), 1, 12)
-	local glassResolution = math.clamp(tonumber(config.GlassResolution) or (isMobile and 96 or 160), 32, 256)
-	local glassStrength = math.clamp(tonumber(config.GlassStrength) or 0.55, 0, 1)
-	local backgroundMode = config.AnimatedBackground or "None"
-	local backgroundIntensity = math.clamp(tonumber(config.BackgroundIntensity) or 0.65, 0, 1)
 	local watermarkEnabled = (config.Watermark == true) or (config.Watermark == nil and true)
 	
 	local customTheme = type(config.Theme) == "table" and config.Theme or {}
@@ -3594,6 +374,7 @@ function Library.CreateWindow(arg1, arg2)
 		_configElements = {},
 		_themeElements = {},
 		_themeControls = {},
+		_blockRegistry = {},
 		ConfigFolder = configFolder,
 		ThemeFolder = "AxiomUIThemes"
 	}
@@ -3832,7 +613,7 @@ function Library.CreateWindow(arg1, arg2)
 		notif.Position = isNotifLeft and UDim2.new(0, -350, 0, 0) or UDim2.new(0, 350, 0, 0)
 		
 		notif.BackgroundTransparency = 1
-		TS:Create(notif, TweenInfo.new(0.4, Enum.EasingStyle.Cubic, Enum.EasingDirection.Out), {
+		TS:Create(notif, TweenInfo.new(0.4, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
 			BackgroundTransparency = THEME.HUDTransparency,
 			Position = UDim2.new(0, 0, 0, 0)
 		}):Play()
@@ -3860,7 +641,7 @@ function Library.CreateWindow(arg1, arg2)
 		end)
 		
 		local function closeNotification()
-			local fadeOut = TS:Create(notif, TweenInfo.new(0.4, Enum.EasingStyle.Cubic, Enum.EasingDirection.Out), {
+			local fadeOut = TS:Create(notif, TweenInfo.new(0.35, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
 				BackgroundTransparency = 1,
 				Position = isNotifLeft and UDim2.new(0, -350, 0, 0) or UDim2.new(0, 350, 0, 0)
 			})
@@ -4019,10 +800,10 @@ function Library.CreateWindow(arg1, arg2)
 			enabled = value
 			if enabled then
 				ApplyTheme(stroke, "Accent", "Color")
-				fill.Size = UDim2.new(1, -6, 1, -6)
+				TS:Create(fill, TweenInfo.new(0.2, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Size = UDim2.new(1, -6, 1, -6)}):Play()
 			else
 				ApplyTheme(stroke, "Outlines", "Color")
-				fill.Size = UDim2.new(0, 0, 0, 0)
+				TS:Create(fill, TweenInfo.new(0.2, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Size = UDim2.new(0, 0, 0, 0)}):Play()
 			end
 			callback(enabled, function()
 				if mobileBtn then
@@ -4052,38 +833,19 @@ function Library.CreateWindow(arg1, arg2)
 		ShadowsEnabled = initShadows
 	}
 
-	local editModeGui = Instance.new("Frame")
-	editModeGui.Name = "EditModeVisuals"
-	editModeGui.Size = UDim2.fromScale(1, 1)
-	editModeGui.BackgroundTransparency = 1
-	editModeGui.Active = false
-	editModeGui.ZIndex = 0
-	editModeGui.Parent = screenGui
-	local editModeDim = Instance.new("Frame")
-	editModeDim.Name = "EditBackdrop"
-	editModeDim.Size = UDim2.fromScale(1, 1)
-	editModeDim.BackgroundColor3 = Color3.fromRGB(5, 9, 18)
-	editModeDim.BackgroundTransparency = 1
-	editModeDim.BorderSizePixel = 0
-	editModeDim.ZIndex = 0
-	editModeDim.Visible = false
-	editModeDim.Parent = screenGui
-	
-	local gridOverlay = Instance.new("ImageLabel")
-	gridOverlay.Name = "GridOverlay"
-	gridOverlay.Size = UDim2.new(1, 0, 1, 0)
-	gridOverlay.BackgroundTransparency = 1
-	gridOverlay.Image = "rbxassetid://6233510619"
-	gridOverlay.ScaleType = Enum.ScaleType.Tile
-	gridOverlay.TileSize = UDim2.new(0, 80, 0, 80)
-	gridOverlay.ImageTransparency = 1
-	gridOverlay.ImageColor3 = Color3.fromRGB(255, 255, 255)
-	gridOverlay.Parent = editModeGui
+	local editModeBackdrop = Instance.new("Frame")
+	editModeBackdrop.Name = "EditModeBackdrop"
+	editModeBackdrop.Size = UDim2.new(1, 0, 1, 0)
+	editModeBackdrop.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+	editModeBackdrop.BackgroundTransparency = 1
+	editModeBackdrop.ZIndex = 400
+	editModeBackdrop.Visible = false
+	editModeBackdrop.Parent = screenGui
 
-	local editModeCC = Instance.new("ColorCorrectionEffect")
-	editModeCC.Name = "UI_EditMode_CC"
-	editModeCC.Saturation = 0
-	editModeCC.Parent = Lighting
+	local editModeBlur = Instance.new("BlurEffect")
+	editModeBlur.Name = "UI_EditMode_Blur"
+	editModeBlur.Size = 0
+	editModeBlur.Parent = Lighting
 	
 	local uiScaleValue = isMobile and 0.65 or 1
 	local finalW, finalH
@@ -4231,429 +993,195 @@ function Library.CreateWindow(arg1, arg2)
 	ApplyTheme(bgColorOverlay, "Background", "BackgroundColor3")
 	ApplyTheme(bgColorOverlay, "BackgroundTrans", "BackgroundTransparency")
 
-	local glassLayer = Instance.new("Frame")
-	glassLayer.Name = "AxiomGlassSurface"
-	glassLayer.BackgroundTransparency = 1
-	glassLayer.BorderSizePixel = 0
-	glassLayer.Size = UDim2.fromScale(1, 1)
-	glassLayer.ZIndex = 2
-	glassLayer.Parent = main
-	local glassCorner = Instance.new("UICorner")
-	glassCorner.CornerRadius = MAIN_CORNER
-	glassCorner.Parent = glassLayer
-	local glassGradient = Instance.new("UIGradient")
-	glassGradient.Rotation = 110
-	glassGradient.Color = ColorSequence.new({
-		ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 255, 255)),
-		ColorSequenceKeypoint.new(0.45, Color3.fromRGB(190, 209, 238)),
-		ColorSequenceKeypoint.new(1, Color3.fromRGB(86, 100, 133))
-	})
-	glassGradient.Transparency = NumberSequence.new({
-		NumberSequenceKeypoint.new(0, 0.72),
-		NumberSequenceKeypoint.new(0.5, 0.96),
-		NumberSequenceKeypoint.new(1, 0.84)
-	})
-	glassGradient.Parent = glassLayer
-	local glassStroke = Instance.new("UIStroke")
-	glassStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-	glassStroke.Thickness = 1.5
-	glassStroke.Parent = glassLayer
-	local glassStrokeGradient = Instance.new("UIGradient")
-	glassStrokeGradient.Rotation = 115
-	glassStrokeGradient.Color = ColorSequence.new(Color3.fromRGB(240, 247, 255), Color3.fromRGB(93, 117, 153))
-	glassStrokeGradient.Transparency = NumberSequence.new({
-		NumberSequenceKeypoint.new(0, 0.13),
-		NumberSequenceKeypoint.new(0.55, 0.75),
-		NumberSequenceKeypoint.new(1, 0.25)
-	})
-	glassStrokeGradient.Parent = glassStroke
-	local glassOriginals = setmetatable({}, {__mode = "k"})
-	local glassStyleOriginals = setmetatable({}, {__mode = "k"})
-	local function attachRealGlass(target)
-		if not glassConfig or not glassModule or not glassModule.addGlassBackground or glassAttached[target] then return false end
-		if typeof(target) ~= "Instance" or not target:IsA("GuiObject") then return false end
-		local count = 0
-		for surface in pairs(glassAttached) do
-			if surface.Parent then count += 1 else glassAttached[surface] = nil end
-		end
-		if count >= glassBudget then return false end
-		local ok, message = pcall(function()
-			glassOriginals[target] = target.BackgroundTransparency
-			target:SetAttribute("MaxOutputResolution", target == glassLayer and glassResolution or math.max(48, math.floor(glassResolution * 0.65)))
-			target:SetAttribute("BlurRadius", UDim.new(0, math.floor(4 + 11 * glassStrength)))
-			target:SetAttribute("Thickness", UDim.new(0, math.floor(6 + 11 * glassStrength)))
-			target:SetAttribute("CornerRadius", UDim.new(0, target == glassLayer and cornerRadiusNum or elCornerRadiusNum))
-			target:SetAttribute("RefractionFactor", 1.8 + 0.5 * glassStrength)
-			target:SetAttribute("FresnelIntensity", 23)
-			target:SetAttribute("GlareIntensity", 38)
-			target:SetAttribute("ChromaticAberration", 0.08)
-			target:SetAttribute("Transparency", math.clamp(0.51 + glassStrength * 0.27, 0.1, 0.89))
-			glassModule.addGlassBackground(target)
-		end)
-		if ok then glassAttached[target] = true else warn("AxiomUI Glass surface:", message) end
-		return ok
-	end
-	local function styleGlassStroke(obj)
-		if not obj:IsA("UIStroke") then return end
-		if not (CS:HasTag(obj, "ElementStroke") or CS:HasTag(obj, "BlockStroke") or obj.Name == "RangeTrackStroke" or obj.Name == "MainOutlineStroke") then return end
-		if not glassStyleOriginals[obj] then
-			glassStyleOriginals[obj] = {Thickness = obj.Thickness, Transparency = obj.Transparency, Enabled = obj.Enabled}
-		end
-		local state = glassStyleOriginals[obj]
-		local gradient = obj:FindFirstChild("AxiomGlassRim")
-		if glassConfig then
-			obj.Enabled = true
-			obj.Thickness = 1.4
-			obj.Transparency = 0.16
-			if not gradient then
-				gradient = Instance.new("UIGradient")
-				gradient.Name = "AxiomGlassRim"
-				gradient.Rotation = 118
-				gradient.Color = ColorSequence.new({ColorSequenceKeypoint.new(0, Color3.fromRGB(238, 250, 255)), ColorSequenceKeypoint.new(0.52, THEME.Outlines), ColorSequenceKeypoint.new(1, Color3.fromRGB(149, 174, 210))})
-				gradient.Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, 0.03), NumberSequenceKeypoint.new(0.55, 0.62), NumberSequenceKeypoint.new(1, 0.17)})
-				gradient.Parent = obj
-			end
-			gradient.Enabled = true
-		else
-			obj.Thickness = state.Thickness
-			obj.Transparency = state.Transparency
-			obj.Enabled = state.Enabled
-			if gradient then gradient.Enabled = false end
-		end
-	end
-	local function styleGlassControl(obj)
-		if not obj:IsA("GuiObject") or obj == glassLayer then return end
-		if obj.Name ~= "ElementContainer" and obj.Name ~= "RangeTrack" and obj.Name ~= "SliderTrack" and obj.Name ~= "ValueBox" then return end
-		if obj.BackgroundTransparency >= 0.98 and not glassStyleOriginals[obj] then return end
-		if not glassStyleOriginals[obj] then glassStyleOriginals[obj] = {Transparency = obj.BackgroundTransparency} end
-		if glassConfig then
-			obj.BackgroundTransparency = math.max(glassStyleOriginals[obj].Transparency, 0.34 + glassStrength * 0.28)
-		else
-			obj.BackgroundTransparency = glassStyleOriginals[obj].Transparency
-		end
-	end
-	local function styleGlassSurfaceCandidate(obj)
-		if not obj:IsA("GuiObject") then return end
-		if obj.Name == "ColorPopup" or obj.Name == "DropdownPopup" then
-			if not obj:GetAttribute("AxiomGlassPopupBound") then
-				obj:SetAttribute("AxiomGlassPopupBound", true)
-				obj:GetPropertyChangedSignal("Visible"):Connect(function()
-					if glassConfig and obj.Visible then
-						attachRealGlass(obj)
-					elseif not obj.Visible and glassAttached[obj] then
-						pcall(function() obj:RemoveTag("GlassmorphicUI") end)
-						if glassOriginals[obj] ~= nil then obj.BackgroundTransparency = glassOriginals[obj] end
-						glassAttached[obj] = nil
-					end
-				end)
-			end
-			if glassConfig and obj.Visible then attachRealGlass(obj) end
-		elseif not glassConfig then
-			return
-		elseif obj.Name:sub(-6) == "_Block" then
-			local count = 0
-			for surface in pairs(glassAttached) do if surface.Parent then count += 1 end end
-			if count < math.max(1, glassBudget - 1) then attachRealGlass(obj) end
-		end
-	end
-	local function setGlass(enabled)
-		glassConfig = enabled == true
-		if glassConfig then loadEmbeddedGlass() end
-		glassLayer.BackgroundColor3 = Color3.fromRGB(220, 232, 255)
-		glassLayer.BackgroundTransparency = glassConfig and (0.93 - 0.07 * glassStrength) or 1
-		glassStroke.Enabled = glassConfig
-		glassGradient.Enabled = glassConfig
-		bgColorOverlay.BackgroundTransparency = glassConfig and math.max(THEME.BackgroundTrans, 0.62 + 0.25 * glassStrength) or THEME.BackgroundTrans
-		if glassConfig then
-			attachRealGlass(glassLayer)
-		else
-			for surface in pairs(glassAttached) do
-				pcall(function() surface:RemoveTag("GlassmorphicUI") end)
-				if surface ~= glassLayer and surface.Parent and glassOriginals[surface] ~= nil then
-					surface.BackgroundTransparency = glassOriginals[surface]
-				end
-				glassAttached[surface] = nil
-			end
-		end
-		for _, obj in ipairs(screenGui:GetDescendants()) do
-			if obj:IsA("UIStroke") then styleGlassStroke(obj)
-			elseif obj:IsA("GuiObject") then
-				styleGlassControl(obj)
-				styleGlassSurfaceCandidate(obj)
-			end
-		end
-	end
-	table.insert(Window._connections, screenGui.DescendantAdded:Connect(function(obj)
-		if not glassConfig then return end
-		if obj:IsA("UIStroke") then task.defer(function() if obj.Parent then styleGlassStroke(obj) end end)
-		elseif obj:IsA("GuiObject") then
-			task.defer(function()
-				if obj.Parent then styleGlassControl(obj); styleGlassSurfaceCandidate(obj) end
-			end)
-		end
-	end))
+	local bgFXHolder = Instance.new("Frame")
+	bgFXHolder.Name = "BackgroundFXHolder"
+	bgFXHolder.Size = UDim2.new(1, 0, 1, 0)
+	bgFXHolder.BackgroundTransparency = 1
+	bgFXHolder.ClipsDescendants = true
+	bgFXHolder.ZIndex = 1
+	bgFXHolder.Parent = main
 
-	local ambientLayer = Instance.new("Frame")
-	ambientLayer.Name = "AxiomAmbientBackground"
-	ambientLayer.BackgroundTransparency = 1
-	ambientLayer.Size = UDim2.fromScale(1, 1)
-	ambientLayer.ClipsDescendants = true
-	ambientLayer.ZIndex = 2
-	ambientLayer.Parent = main
-	local ambientNodes = {}
-	local ambientToken = 0
-	local ambientRandom = Random.new()
-	local ambientConnections = {}
-	local function clearAmbient()
-		ambientToken += 1
-		for _, connection in ipairs(ambientConnections) do connection:Disconnect() end
-		table.clear(ambientConnections)
-		for _, node in ipairs(ambientNodes) do node:Destroy() end
-		table.clear(ambientNodes)
-	end
-	local function ambientDot(x, y, diameter)
-		local dot = Instance.new("Frame")
-		dot.Name = "AmbientDot"
-		dot.BorderSizePixel = 0
-		dot.Size = UDim2.fromOffset(diameter, diameter)
-		dot.AnchorPoint = Vector2.new(0.5, 0.5)
-		dot.Position = UDim2.fromScale(x, y)
-		dot.BackgroundColor3 = THEME.Accent
-		dot.BackgroundTransparency = 1
-		dot.ZIndex = 2
-		dot.Parent = ambientLayer
-		local corner = Instance.new("UICorner")
-		corner.CornerRadius = UDim.new(1, 0)
-		corner.Parent = dot
-		table.insert(ambientNodes, dot)
-		return dot
-	end
-	local function setAmbient(mode)
-		clearAmbient()
-		backgroundMode = mode or "None"
-		if backgroundMode == "None" then return end
-		local token = ambientToken
-		if backgroundMode == "Aurora" then
-			for i = 1, 4 do
-				local beam = Instance.new("Frame")
-				beam.Name = "AuroraRibbon"
-				beam.BorderSizePixel = 0
-				beam.BackgroundColor3 = THEME.Accent
-				beam.BackgroundTransparency = 0.68 + i * 0.06
-				beam.Size = UDim2.fromScale(0.34, 1.5)
-				beam.AnchorPoint = Vector2.new(0.5, 0.5)
-				beam.Position = UDim2.fromScale((i-1)*0.35, 0.5)
-				beam.Rotation = 30
-				beam.ZIndex = 2
-				beam.Parent = ambientLayer
-				local fade = Instance.new("UIGradient")
-				fade.Rotation = 0
-				fade.Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.5, 1 - 0.32*backgroundIntensity), NumberSequenceKeypoint.new(1, 1)})
-				fade.Parent = beam
-				table.insert(ambientNodes, beam)
-				task.spawn(function()
-					while token == ambientToken and beam.Parent and screenGui.Parent do
-						local duration = ambientRandom:NextNumber(6, 11)
-						local animation = TS:Create(beam, TweenInfo.new(duration, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {
-							Position = UDim2.fromScale(ambientRandom:NextNumber(-0.2, 1.2), 0.5),
-							Rotation = ambientRandom:NextNumber(20, 50)
-						})
-						animation:Play()
-						task.wait(duration)
-					end
-				end)
-			end
-			return
+	local currentFXConnection = nil
+	local fxElements = {}
+
+	local function clearFX()
+		if currentFXConnection then
+			currentFXConnection:Disconnect()
+			currentFXConnection = nil
 		end
-		if backgroundMode == "Comets" then
-			for i = 1, 12 do
-				local dot = ambientDot(ambientRandom:NextNumber(), ambientRandom:NextNumber(), 2)
-				local tail = Instance.new("Frame")
-				tail.Name = "CometTrail"
-				tail.AnchorPoint = Vector2.new(1, 0.5)
-				tail.BackgroundColor3 = THEME.Accent
-				tail.BackgroundTransparency = 0.88
-				tail.BorderSizePixel = 0
-				tail.Size = UDim2.fromOffset(38, 1)
-				tail.Parent = dot
-				table.insert(ambientNodes, tail)
-				task.spawn(function()
-					while token == ambientToken and dot.Parent and screenGui.Parent do
-						local duration = ambientRandom:NextNumber(2, 5)
-						dot.Position = UDim2.fromScale(ambientRandom:NextNumber(-0.25, 0.2), ambientRandom:NextNumber(0.05, 0.95))
-						dot.BackgroundTransparency = 1 - backgroundIntensity * 0.6
-						TS:Create(dot, TweenInfo.new(duration, Enum.EasingStyle.Linear), {Position = dot.Position + UDim2.fromScale(1.1, -0.3), BackgroundTransparency = 1}):Play()
-						task.wait(duration + ambientRandom:NextNumber(0.1, 2))
-					end
-				end)
-			end
-			return
+		for _, el in ipairs(fxElements) do
+			if typeof(el) == "Instance" then el:Destroy() end
 		end
-		if backgroundMode == "Constellation" then
-			local pairsList = {}
-			for i = 1, 13 do
-				local x, y = ambientRandom:NextNumber(0.04, 0.96), ambientRandom:NextNumber(0.06, 0.94)
-				local dot = ambientDot(x, y, 3)
-				local target = ambientDot(x + 0.02, y + 0.02, 2)
+		table.clear(fxElements)
+	end
+
+	local function initBackgroundFX(mode)
+		clearFX()
+		if mode == "None" then return end
+
+		if mode == "Constellation" then
+			local count = 22
+			local nodes = {}
+			local linesPool = {}
+			for i = 1, count do
+				local node = Instance.new("Frame")
+				node.Size = UDim2.new(0, 4, 0, 4)
+				node.AnchorPoint = Vector2.new(0.5, 0.5)
+				node.BorderSizePixel = 0
+				node.BackgroundTransparency = 0.3
+				ApplyTheme(node, "Accent", "BackgroundColor3")
+				local nc = Instance.new("UICorner")
+				nc.CornerRadius = UDim.new(1, 0)
+				nc.Parent = node
+				node.Parent = bgFXHolder
+				table.insert(fxElements, node)
+				table.insert(nodes, {
+					Obj = node,
+					X = math.random() * (bgFXHolder.AbsoluteSize.X > 0 and bgFXHolder.AbsoluteSize.X or 800),
+					Y = math.random() * (bgFXHolder.AbsoluteSize.Y > 0 and bgFXHolder.AbsoluteSize.Y or 500),
+					VX = (math.random() - 0.5) * 32,
+					VY = (math.random() - 0.5) * 32
+				})
+			end
+			for i = 1, 45 do
 				local line = Instance.new("Frame")
-				line.Name = "AmbientConnection"
+				line.AnchorPoint = Vector2.new(0.5, 0.5)
 				line.BorderSizePixel = 0
-				line.AnchorPoint = Vector2.new(0, 0.5)
-				line.BackgroundColor3 = THEME.Accent
-				line.BackgroundTransparency = 1
-				line.ZIndex = 2
-				line.Parent = ambientLayer
-				table.insert(ambientNodes, line)
-				table.insert(pairsList, {dot, target, line})
-				for _, point in ipairs({dot, target}) do
-					task.spawn(function()
-						while token == ambientToken and point.Parent and screenGui.Parent do
-							local duration = ambientRandom:NextNumber(3, 6)
-							TS:Create(point, TweenInfo.new(duration, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {
-								Position = UDim2.fromScale(ambientRandom:NextNumber(0.04, 0.96), ambientRandom:NextNumber(0.06, 0.94)),
-								BackgroundTransparency = 1 - ambientRandom:NextNumber(0.25, 0.7) * backgroundIntensity
-							}):Play()
-							task.wait(duration)
+				line.Visible = false
+				ApplyTheme(line, "Accent", "BackgroundColor3")
+				line.Parent = bgFXHolder
+				table.insert(fxElements, line)
+				table.insert(linesPool, line)
+			end
+			currentFXConnection = RS.RenderStepped:Connect(function(dt)
+				if not bgFXHolder.Parent then return end
+				local w, h = bgFXHolder.AbsoluteSize.X, bgFXHolder.AbsoluteSize.Y
+				if w <= 10 or h <= 10 then return end
+				for _, n in ipairs(nodes) do
+					n.X = n.X + (n.VX * dt)
+					n.Y = n.Y + (n.VY * dt)
+					if n.X <= 0 then n.X = 0; n.VX = -n.VX end
+					if n.X >= w then n.X = w; n.VX = -n.VX end
+					if n.Y <= 0 then n.Y = 0; n.VY = -n.VY end
+					if n.Y >= h then n.Y = h; n.VY = -n.VY end
+					n.Obj.Position = UDim2.new(0, n.X, 0, n.Y)
+				end
+				local lineIdx = 1
+				local maxDist = 95
+				for i = 1, #nodes do
+					for j = i + 1, #nodes do
+						local p1, p2 = nodes[i], nodes[j]
+						local dx = p2.X - p1.X
+						local dy = p2.Y - p1.Y
+						local dist = math.sqrt((dx * dx) + (dy * dy))
+						if dist < maxDist and lineIdx <= #linesPool then
+							local line = linesPool[lineIdx]
+							lineIdx = lineIdx + 1
+							local midX = (p1.X + p2.X) * 0.5
+							local midY = (p1.Y + p2.Y) * 0.5
+							local angle = math.deg(math.atan2(dy, dx))
+							line.Size = UDim2.new(0, dist, 0, 1)
+							line.Position = UDim2.new(0, midX, 0, midY)
+							line.Rotation = angle
+							line.BackgroundTransparency = 0.4 + (0.55 * (dist / maxDist))
+							line.Visible = true
 						end
-					end)
+					end
+				end
+				for k = lineIdx, #linesPool do
+					linesPool[k].Visible = false
+				end
+			end)
+		elseif mode == "Matrix Dots" then
+			local dotSize = 3
+			local spacing = 34
+			local matrix = {}
+			local function spawnMatrix()
+				for _, el in ipairs(fxElements) do el:Destroy() end
+				table.clear(fxElements)
+				table.clear(matrix)
+				local w, h = bgFXHolder.AbsoluteSize.X, bgFXHolder.AbsoluteSize.Y
+				if w <= 10 or h <= 10 then return end
+				local cols = math.floor(w / spacing)
+				local rows = math.floor(h / spacing)
+				for r = 0, rows do
+					for c = 0, cols do
+						local dot = Instance.new("Frame")
+						dot.Size = UDim2.new(0, dotSize, 0, dotSize)
+						dot.AnchorPoint = Vector2.new(0.5, 0.5)
+						dot.Position = UDim2.new(0, (c * spacing) + 16, 0, (r * spacing) + 16)
+						dot.BorderSizePixel = 0
+						dot.BackgroundTransparency = 0.95
+						ApplyTheme(dot, "Accent", "BackgroundColor3")
+						local cObj = Instance.new("UICorner")
+						cObj.CornerRadius = UDim.new(1, 0)
+						cObj.Parent = dot
+						dot.Parent = bgFXHolder
+						table.insert(fxElements, dot)
+						table.insert(matrix, {Dot = dot, Seed = math.random() * 100})
+					end
 				end
 			end
-			local elapsed = 0
-			table.insert(ambientConnections, RS.RenderStepped:Connect(function(dt)
-				elapsed += dt
-				if elapsed < 1 / 24 then return end
-				elapsed = 0
-				local size = ambientLayer.AbsoluteSize
-				if size.X <= 0 or size.Y <= 0 then return end
-				for _, pair in ipairs(pairsList) do
-					local first, second, line = pair[1], pair[2], pair[3]
-					local ax = first.Position.X.Scale * size.X
-					local ay = first.Position.Y.Scale * size.Y
-					local bx = second.Position.X.Scale * size.X
-					local by = second.Position.Y.Scale * size.Y
-					local dx, dy = bx - ax, by - ay
-					local distance = math.sqrt(dx * dx + dy * dy)
-					line.Position = UDim2.fromOffset(ax, ay)
-					line.Size = UDim2.fromOffset(distance, 1)
-					line.Rotation = math.deg(math.atan2(dy, dx))
-					line.BackgroundTransparency = math.clamp(0.76 + distance / math.max(size.X, size.Y) * 0.4 - backgroundIntensity * 0.13, 0.68, 1)
+			spawnMatrix()
+			table.insert(Window._connections, bgFXHolder:GetPropertyChangedSignal("AbsoluteSize"):Connect(spawnMatrix))
+			currentFXConnection = RS.RenderStepped:Connect(function()
+				local t = os.clock() * 1.5
+				for _, item in ipairs(matrix) do
+					local val = math.sin(t + item.Seed) * math.cos((t * 0.7) + (item.Seed * 0.4))
+					if val > 0.45 then
+						item.Dot.BackgroundTransparency = 0.25 + ((1 - val) * 1.1)
+					else
+						item.Dot.BackgroundTransparency = 0.94
+					end
 				end
-			end))
-			return
-		end
-		local columns = backgroundMode == "DotMatrix" and 11 or 9
-		local rows = backgroundMode == "DotMatrix" and 8 or 7
-		for i = 1, columns * rows do
-			local x = ((i - 1) % columns + 0.5) / columns
-			local y = (math.floor((i - 1) / columns) + 0.5) / rows
-			local dot = ambientDot(x, y, backgroundMode == "PulseGrid" and 3 or 2)
-			task.spawn(function()
-				while token == ambientToken and dot.Parent and screenGui.Parent do
-					local duration = ambientRandom:NextNumber(1.4, 3.6)
-					local island = (math.sin(x * 15 + os.clock() * 0.5) + math.cos(y * 12 - os.clock() * 0.4)) * 0.25 + 0.5
-					local opacity = ambientRandom:NextNumber() < island and ambientRandom:NextNumber(0.2, 0.7) * backgroundIntensity or 0
-					TS:Create(dot, TweenInfo.new(duration, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {
-						BackgroundTransparency = 1 - opacity,
-						Size = UDim2.fromOffset(backgroundMode == "PulseGrid" and 2 + opacity * 3 or 2, backgroundMode == "PulseGrid" and 2 + opacity * 3 or 2)
-					}):Play()
-					task.wait(duration)
+			end)
+		elseif mode == "Floating Sparks" then
+			local sparksCount = 30
+			local sparks = {}
+			for i = 1, sparksCount do
+				local s = Instance.new("Frame")
+				local sz = math.random(2, 4)
+				s.Size = UDim2.new(0, sz, 0, sz)
+				s.AnchorPoint = Vector2.new(0.5, 0.5)
+				s.BorderSizePixel = 0
+				s.BackgroundTransparency = math.random(20, 60) / 100
+				ApplyTheme(s, "Accent", "BackgroundColor3")
+				local sc = Instance.new("UICorner")
+				sc.CornerRadius = UDim.new(1, 0)
+				sc.Parent = s
+				s.Parent = bgFXHolder
+				table.insert(fxElements, s)
+				table.insert(sparks, {
+					Obj = s,
+					X = math.random() * (bgFXHolder.AbsoluteSize.X > 0 and bgFXHolder.AbsoluteSize.X or 800),
+					Y = math.random() * (bgFXHolder.AbsoluteSize.Y > 0 and bgFXHolder.AbsoluteSize.Y or 500),
+					Speed = math.random(15, 45),
+					Sway = math.random(1, 3),
+					Offset = math.random() * 10
+				})
+			end
+			currentFXConnection = RS.RenderStepped:Connect(function(dt)
+				local w, h = bgFXHolder.AbsoluteSize.X, bgFXHolder.AbsoluteSize.Y
+				if w <= 10 or h <= 10 then return end
+				local t = os.clock()
+				for _, sp in ipairs(sparks) do
+					sp.Y = sp.Y - (sp.Speed * dt)
+					local wave = math.sin(t * sp.Sway + sp.Offset) * 20 * dt
+					sp.X = sp.X + wave
+					if sp.Y <= -5 then
+						sp.Y = h + 5
+						sp.X = math.random() * w
+					end
+					sp.Obj.Position = UDim2.new(0, sp.X, 0, sp.Y)
 				end
 			end)
 		end
 	end
-	function Window:SetGlassMode(enabled, strength)
-		if strength ~= nil then glassStrength = math.clamp(tonumber(strength) or glassStrength, 0, 1) end
-		setGlass(enabled)
-		if glassConfig then
-			for surface in pairs(glassAttached) do
-				if surface.Parent then
-					surface:SetAttribute("BlurRadius", UDim.new(0, math.floor(4 + 11 * glassStrength)))
-					surface:SetAttribute("Transparency", math.clamp(0.51 + glassStrength * 0.27, 0.1, 0.89))
-				end
-			end
-		end
-	end
-	function Window:SetAnimatedBackground(mode, intensity)
-		if intensity ~= nil then backgroundIntensity = math.clamp(tonumber(intensity) or backgroundIntensity, 0, 1) end
-		if mode ~= "None" and mode ~= "Constellation" and mode ~= "DotMatrix" and mode ~= "PulseGrid" and mode ~= "Aurora" and mode ~= "Comets" then return false end
-		setAmbient(mode)
-		return true
-	end
-	function Window:SetGlassQuality(level)
-		if level == "Low" then
-			glassResolution = 72
-			glassBudget = 2
-		elseif level == "High" then
-			glassResolution = isMobile and 128 or 224
-			glassBudget = isMobile and 3 or 7
-		elseif level == "Balanced" then
-			glassResolution = isMobile and 96 or 160
-			glassBudget = isMobile and 2 or 5
-		else return false end
-		for surface in pairs(glassAttached) do
-			if surface.Parent then
-				surface:SetAttribute("MaxOutputResolution", surface == glassLayer and glassResolution or math.max(48, math.floor(glassResolution * 0.65)))
-			end
-		end
-		return true
-	end
-	function Window:GetGlassStats()
-		local stats = {}
-		if glassModule and glassModule.getDebugStats then
-			for target in pairs(glassAttached) do
-				local status = glassModule.getDebugStats(target)
-				if status then stats[target.Name] = status end
-			end
-		end
-		return stats
-	end
-	function Window:SetMotion(enabled, duration)
-		motionConfig = enabled ~= false
-		if duration ~= nil then motionDuration = math.clamp(tonumber(duration) or motionDuration, 0.05, 1.5) end
-	end
-	function Window:Animate(target, properties, duration, easing)
-		if typeof(target) ~= "Instance" or type(properties) ~= "table" then return nil end
-		if not motionConfig then
-			for property, value in pairs(properties) do pcall(function() target[property] = value end) end
-			return nil
-		end
-		local tween = TS:Create(target, TweenInfo.new(duration or motionDuration, easing or Enum.EasingStyle.Quint, Enum.EasingDirection.Out), properties)
-		tween:Play()
-		return tween
-	end
-	table.insert(Window._connections, screenGui.Destroying:Connect(clearAmbient))
-	setGlass(glassConfig)
-	setAmbient(backgroundMode)
-	local motionButtons = setmetatable({}, {__mode = "k"})
-	local function bindButtonMotion(btn)
-		if not btn:IsA("GuiButton") or motionButtons[btn] then return end
-		motionButtons[btn] = true
-		if btn.Name == "MinHandle" or btn.Name == "MaxHandle" then return end
-		local scale = btn:FindFirstChildOfClass("UIScale")
-		if not scale then scale = Instance.new("UIScale"); scale.Name = "AxiomInteractionScale"; scale.Parent = btn end
-		local normalScale = scale.Scale
-		local hovering = false
-		local held = false
-		local currentTween
-		local function animateButton()
-			if not btn.Parent then return end
-			local target = normalScale * (held and 0.955 or (hovering and 1.025 or 1))
-			if not motionConfig then scale.Scale = normalScale; return end
-			if currentTween then currentTween:Cancel() end
-			currentTween = TS:Create(scale, TweenInfo.new(math.min(0.17, motionDuration), Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Scale = target})
-			currentTween:Play()
-		end
-		btn.MouseEnter:Connect(function() hovering = true; animateButton() end)
-		btn.MouseLeave:Connect(function() hovering = false; held = false; animateButton() end)
-		btn.InputBegan:Connect(function(input)
-			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then held = true; animateButton() end
-		end)
-		btn.InputEnded:Connect(function(input)
-			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then held = false; animateButton() end
-		end)
-	end
-	for _, child in ipairs(screenGui:GetDescendants()) do bindButtonMotion(child) end
-	table.insert(Window._connections, screenGui.DescendantAdded:Connect(bindButtonMotion))
+
+	task.spawn(function()
+		task.wait(0.2)
+		initBackgroundFX(THEME.BackgroundEffect)
+	end)
 
 	local dragArea = Instance.new("Frame")
 	dragArea.Name = "DragArea"
@@ -5290,11 +1818,12 @@ function Library.CreateWindow(arg1, arg2)
 	pagesFolder.ZIndex = 5
 	pagesFolder.Parent = main
 
-	local searchPage = Instance.new("Frame")
+	local searchPage = Instance.new("CanvasGroup")
 	searchPage.Name = "SearchPage"
 	searchPage.Size = UDim2.new(1, 0, 1, 0)
 	searchPage.Position = UDim2.new(0, 0, 0, 0)
 	searchPage.BackgroundTransparency = 1
+	searchPage.GroupTransparency = 1
 	searchPage.ClipsDescendants = true
 	searchPage.Visible = false
 	searchPage.Parent = pagesFolder
@@ -5490,13 +2019,24 @@ function Library.CreateWindow(arg1, arg2)
 			for _, b in ipairs(searchLeftCol:GetChildren()) do if b:IsA("Frame") then b:Destroy() end end
 			for _, b in ipairs(searchRightCol:GetChildren()) do if b:IsA("Frame") then b:Destroy() end end
 			
-			searchPage.Visible = false
+			TS:Create(searchPage, TweenInfo.new(0.2, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {GroupTransparency = 1}):Play()
+			task.delay(0.2, function()
+				if searchInput.Text == "" then
+					searchPage.Visible = false
+				end
+			end)
 			if Window.CurrentTab and Window.CurrentTab.Page then
 				Window.CurrentTab.Page.Visible = true
+				TS:Create(Window.CurrentTab.Page, TweenInfo.new(0.25, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {GroupTransparency = 0, Position = UDim2.new(0, 0, 0, 0)}):Play()
 			end
 		else
 			if Window.CurrentTab and Window.CurrentTab.Page then
-				Window.CurrentTab.Page.Visible = false
+				TS:Create(Window.CurrentTab.Page, TweenInfo.new(0.18, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {GroupTransparency = 1, Position = UDim2.new(0, 0, 0, -8)}):Play()
+				task.delay(0.18, function()
+					if searchInput.Text ~= "" and Window.CurrentTab and Window.CurrentTab.Page then
+						Window.CurrentTab.Page.Visible = false
+					end
+				end)
 			end
 			for _, entry in ipairs(Window._searchRegistry) do
 				entry.UI.Parent = entry.OriginalParent
@@ -5528,7 +2068,13 @@ function Library.CreateWindow(arg1, arg2)
 					end
 				end
 			end
+			searchPage.Position = UDim2.new(0, 0, 0, 8)
+			searchPage.GroupTransparency = 1
 			searchPage.Visible = true
+			TS:Create(searchPage, TweenInfo.new(0.25, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
+				GroupTransparency = 0,
+				Position = UDim2.new(0, 0, 0, 0)
+			}):Play()
 		end
 	end))
 
@@ -5868,18 +2414,18 @@ function Library.CreateWindow(arg1, arg2)
 	end))
 
 	local isDestroyed, isUIOpen = false, true
-	local animInfo = TweenInfo.new(0.25, Enum.EasingStyle.Cubic, Enum.EasingDirection.Out)
+	local animInfo = TweenInfo.new(0.28, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
 	local currentActiveTween = nil
 
 	local function getAnimHideTransform(animType)
 		if animType == 2 then
-			return UDim2.new(0, 0, 0, -20), UDim2.new(1, 0, 1, 0)
+			return UDim2.new(0, 0, 0, -25), UDim2.new(1, 0, 1, 0)
 		elseif animType == 3 then
-			return UDim2.new(0.025, 0, 0.025, 0), UDim2.new(0.95, 0, 0.95, 0)
+			return UDim2.new(0.03, 0, 0.03, 0), UDim2.new(0.94, 0, 0.94, 0)
 		elseif animType == 4 then
-			return UDim2.new(0, 25, 0, 0), UDim2.new(1, 0, 1, 0)
+			return UDim2.new(0, 30, 0, 0), UDim2.new(1, 0, 1, 0)
 		else
-			return UDim2.new(0, 0, 0, 20), UDim2.new(1, 0, 1, 0)
+			return UDim2.new(0, 0, 0, 25), UDim2.new(1, 0, 1, 0)
 		end
 	end
 
@@ -5934,7 +2480,6 @@ function Library.CreateWindow(arg1, arg2)
 			TS:Create(arcOuterStroke, animInfo, {Transparency = 0}):Play()
 			TS:Create(topbarDivider, animInfo, {BackgroundTransparency = 0}):Play()
 			TS:Create(sidebarDivider, animInfo, {BackgroundTransparency = 0}):Play()
-			
 		else
 			Window.ClosePopup()
 			
@@ -5962,7 +2507,6 @@ function Library.CreateWindow(arg1, arg2)
 			TS:Create(topbarDivider, animInfo, {BackgroundTransparency = 1}):Play()
 			TS:Create(sidebarDivider, animInfo, {BackgroundTransparency = 1}):Play()
 			
-			
 			local animRef = currentActiveTween
 			animRef.Completed:Connect(function()
 				if not isUIOpen and currentActiveTween == animRef then
@@ -5985,19 +2529,20 @@ function Library.CreateWindow(arg1, arg2)
 			if conn.Connected then conn:Disconnect() end
 		end
 		table.clear(Window._connections)
+		clearFX()
 		task.delay(0.4, function() 
-			pcall(function() editModeCC:Destroy() end)
+			pcall(function() editModeBlur:Destroy() end)
 			pcall(function() screenGui:Destroy() end) 
 		end)
 	end))
 
 	table.insert(Window._connections, closeBtn.MouseEnter:Connect(function() 
-		TS:Create(crossLine1, TweenInfo.new(0.2), {BackgroundColor3 = THEME.CloseBtn}):Play() 
-		TS:Create(crossLine2, TweenInfo.new(0.2), {BackgroundColor3 = THEME.CloseBtn}):Play() 
+		TS:Create(crossLine1, TweenInfo.new(0.2, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {BackgroundColor3 = THEME.CloseBtn}):Play() 
+		TS:Create(crossLine2, TweenInfo.new(0.2, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {BackgroundColor3 = THEME.CloseBtn}):Play() 
 	end))
 	table.insert(Window._connections, closeBtn.MouseLeave:Connect(function() 
-		TS:Create(crossLine1, TweenInfo.new(0.2), {BackgroundColor3 = THEME.TextMuted}):Play() 
-		TS:Create(crossLine2, TweenInfo.new(0.2), {BackgroundColor3 = THEME.TextMuted}):Play() 
+		TS:Create(crossLine1, TweenInfo.new(0.2, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {BackgroundColor3 = THEME.TextMuted}):Play() 
+		TS:Create(crossLine2, TweenInfo.new(0.2, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {BackgroundColor3 = THEME.TextMuted}):Play() 
 	end))
 
 	if isMobile then
@@ -6057,98 +2602,89 @@ function Library.CreateWindow(arg1, arg2)
 		end
 	end))
 
-	local themeEditorContainer = Instance.new("ScrollingFrame")
-	themeEditorContainer.Name = "ThemeEditorContainer"
-	themeEditorContainer.Size = UDim2.new(0, 565, 1, -40)
-	themeEditorContainer.Position = UDim2.new(0, 20, 0.5, 0)
-	themeEditorContainer.AnchorPoint = Vector2.new(0, 0.5)
-	themeEditorContainer.BackgroundTransparency = 0.06
-	themeEditorContainer.BorderSizePixel = 0
-	ApplyTheme(themeEditorContainer, "Background", "BackgroundColor3")
-	themeEditorContainer.ZIndex = 70
-	themeEditorContainer.Visible = false
-	themeEditorContainer.ScrollBarThickness = 0
-	themeEditorContainer.AutomaticCanvasSize = Enum.AutomaticSize.Y
-	themeEditorContainer.CanvasSize = UDim2.new(0, 0, 0, 0)
-	themeEditorContainer.Parent = screenGui
+	local themeEditorFrame = Instance.new("Frame")
+	themeEditorFrame.Name = "ThemeEditorFrame"
+	themeEditorFrame.Size = UDim2.new(0, 560, 0, 520)
+	themeEditorFrame.Position = UDim2.new(0, 25, 0.5, -260)
+	themeEditorFrame.BackgroundTransparency = 1
+	themeEditorFrame.ZIndex = 800
+	themeEditorFrame.Visible = false
+	themeEditorFrame.Active = true
+	themeEditorFrame.Parent = screenGui
 
 	local teScale = Instance.new("UIScale")
 	teScale.Scale = isMobile and 0.65 or 1
-	teScale.Parent = themeEditorContainer
-	local themePanelCorner = Instance.new("UICorner")
-	themePanelCorner.CornerRadius = UDim.new(0, 13)
-	themePanelCorner.Parent = themeEditorContainer
-	local themePanelStroke = Instance.new("UIStroke")
-	themePanelStroke.Thickness = 1.5
-	themePanelStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-	themePanelStroke.Parent = themeEditorContainer
-	ApplyTheme(themePanelStroke, "Outlines", "Color")
-	local panelGradient = Instance.new("UIGradient")
-	panelGradient.Color = ColorSequence.new(Color3.fromRGB(220, 245, 255), THEME.Outlines)
-	panelGradient.Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, 0.24), NumberSequenceKeypoint.new(1, 0.88)})
-	panelGradient.Parent = themePanelStroke
-	local editorDock = 1
-	local editorBar = Instance.new("Frame")
-	editorBar.Name = "AxiomEditorToolbar"
-	editorBar.Size = UDim2.fromOffset(360, 34)
-	editorBar.BackgroundTransparency = 0.08
-	editorBar.BorderSizePixel = 0
-	editorBar.ZIndex = 80
-	editorBar.Visible = false
-	editorBar.Parent = screenGui
-	ApplyTheme(editorBar, "Card", "BackgroundColor3")
-	local barCorner = Instance.new("UICorner")
-	barCorner.CornerRadius = UDim.new(0, 10)
-	barCorner.Parent = editorBar
-	local barStroke = Instance.new("UIStroke")
-	barStroke.Thickness = 1
-	barStroke.Color = THEME.Accent
-	barStroke.Parent = editorBar
-	local barTitle = Instance.new("TextLabel")
-	barTitle.Size = UDim2.new(1, -146, 1, 0)
-	barTitle.Position = UDim2.fromOffset(12, 0)
-	barTitle.BackgroundTransparency = 1
-	barTitle.Text = "AXIOM  /  LIVE EDITOR"
-	barTitle.TextXAlignment = Enum.TextXAlignment.Left
-	barTitle.TextSize = 11
-	barTitle.ZIndex = 81
-	barTitle.Parent = editorBar
-	ApplyTheme(barTitle, "Text", "TextColor3")
-	ApplyTheme(barTitle, "TextFont", "Font")
-	local function addEditorButton(text, offset)
-		local button = Instance.new("TextButton")
-		button.Name = "Editor" .. text
-		button.Size = UDim2.fromOffset(60, 25)
-		button.AnchorPoint = Vector2.new(1, 0.5)
-		button.Position = UDim2.new(1, offset, 0.5, 0)
-		button.BackgroundTransparency = 0.18
-		button.Text = text
-		button.TextSize = 11
-		button.ZIndex = 81
-		button.Parent = editorBar
-		ApplyTheme(button, "Element", "BackgroundColor3")
-		ApplyTheme(button, "Text", "TextColor3")
-		ApplyTheme(button, "TextFont", "Font")
-		local corner = Instance.new("UICorner")
-		corner.CornerRadius = UDim.new(0, 7)
-		corner.Parent = button
-		local stroke = Instance.new("UIStroke")
-		stroke.Thickness = 1
-		stroke.Parent = button
-		ApplyTheme(stroke, "Outlines", "Color")
-		return button
-	end
-	local editModeToggleAPI
-	local editorDockButton = addEditorButton("Dock", -78)
-	local editorExitButton = addEditorButton("Close", -10)
-	editorDockButton.MouseButton1Click:Connect(function() editorDock = editorDock % 3 + 1 end)
-	editorExitButton.MouseButton1Click:Connect(function()
-		if editModeToggleAPI then editModeToggleAPI:Set(false) else Window.ToggleEditMode(false) end
-	end)
+	teScale.Parent = themeEditorFrame
+
+	local teDragHeader = Instance.new("Frame")
+	teDragHeader.Name = "ThemeEditorHeader"
+	teDragHeader.Size = UDim2.new(1, 0, 0, 36)
+	teDragHeader.BorderSizePixel = 0
+	teDragHeader.ZIndex = 802
+	teDragHeader.Parent = themeEditorFrame
+	ApplyTheme(teDragHeader, "Card", "BackgroundColor3")
+
+	local teHeaderCorner = Instance.new("UICorner")
+	teHeaderCorner.CornerRadius = GLOBAL_CORNER
+	teHeaderCorner.Parent = teDragHeader
+	CS:AddTag(teHeaderCorner, "ElementCorner")
+
+	local teHeaderTitle = Instance.new("TextLabel")
+	teHeaderTitle.Size = UDim2.new(1, -20, 1, 0)
+	teHeaderTitle.Position = UDim2.new(0, 14, 0, 0)
+	teHeaderTitle.BackgroundTransparency = 1
+	teHeaderTitle.Text = "Theme Customizer"
+	teHeaderTitle.TextSize = 13
+	teHeaderTitle.TextXAlignment = Enum.TextXAlignment.Left
+	teHeaderTitle.Parent = teDragHeader
+	ApplyTheme(teHeaderTitle, "Text", "TextColor3")
+	ApplyTheme(teHeaderTitle, "TextFont", "Font")
+
+	local teDragging, teDragInput, teDragStart, teStartPos
+	table.insert(Window._connections, teDragHeader.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			teDragging = true
+			teDragStart = input.Position
+			teStartPos = themeEditorFrame.Position
+			local endConn
+			endConn = input.Changed:Connect(function()
+				if input.UserInputState == Enum.UserInputState.End then
+					teDragging = false
+					endConn:Disconnect()
+				end
+			end)
+			table.insert(Window._connections, endConn)
+		end
+	end))
+	table.insert(Window._connections, teDragHeader.InputChanged:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+			teDragInput = input
+		end
+	end))
+	table.insert(Window._connections, UIS.InputChanged:Connect(function(input)
+		if input == teDragInput and teDragging then
+			local delta = input.Position - teDragStart
+			themeEditorFrame.Position = UDim2.new(teStartPos.X.Scale, teStartPos.X.Offset + delta.X, teStartPos.Y.Scale, teStartPos.Y.Offset + delta.Y)
+		end
+	end))
+
+	local themeEditorContainer = Instance.new("ScrollingFrame")
+	themeEditorContainer.Name = "ThemeEditorContainer"
+	themeEditorContainer.Size = UDim2.new(1, 0, 1, -42)
+	themeEditorContainer.Position = UDim2.new(0, 0, 0, 42)
+	themeEditorContainer.BackgroundTransparency = 1
+	themeEditorContainer.ScrollBarThickness = 2
+	themeEditorContainer.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	themeEditorContainer.CanvasSize = UDim2.new(0, 0, 0, 0)
+	themeEditorContainer.ZIndex = 801
+	themeEditorContainer.Parent = themeEditorFrame
+	ApplyTheme(themeEditorContainer, "Outlines", "ScrollBarImageColor3")
 
 	local themeEditorPad = Instance.new("UIPadding")
-	themeEditorPad.PaddingTop = UDim.new(0, 15)
+	themeEditorPad.PaddingTop = UDim.new(0, 4)
 	themeEditorPad.PaddingBottom = UDim.new(0, 15)
+	themeEditorPad.PaddingLeft = UDim.new(0, 2)
+	themeEditorPad.PaddingRight = UDim.new(0, 8)
 	themeEditorPad.Parent = themeEditorContainer
 
 	local themeEditorLayout = Instance.new("UIListLayout")
@@ -6160,7 +2696,7 @@ function Library.CreateWindow(arg1, arg2)
 	
 	local themeEditorLeft = Instance.new("Frame")
 	themeEditorLeft.Name = "ThemeLeftCol"
-	themeEditorLeft.Size = UDim2.new(0.5, -7, 0, 0)
+	themeEditorLeft.Size = UDim2.new(0.5, -8, 0, 0)
 	themeEditorLeft.AutomaticSize = Enum.AutomaticSize.Y
 	themeEditorLeft.BackgroundTransparency = 1
 	themeEditorLeft.Parent = themeEditorContainer
@@ -6171,7 +2707,7 @@ function Library.CreateWindow(arg1, arg2)
 
 	local themeEditorRight = Instance.new("Frame")
 	themeEditorRight.Name = "ThemeRightCol"
-	themeEditorRight.Size = UDim2.new(0.5, -7, 0, 0)
+	themeEditorRight.Size = UDim2.new(0.5, -8, 0, 0)
 	themeEditorRight.AutomaticSize = Enum.AutomaticSize.Y
 	themeEditorRight.BackgroundTransparency = 1
 	themeEditorRight.Parent = themeEditorContainer
@@ -6182,13 +2718,13 @@ function Library.CreateWindow(arg1, arg2)
 
 	local function updateThemeLayout(style)
 		if style == 3 or style == 4 then
-			themeEditorPad.PaddingTop = UDim.new(0, 8)
+			themeEditorPad.PaddingTop = UDim.new(0, 4)
 			themeEditorPad.PaddingBottom = UDim.new(0, 8)
 			themeEditorLayout.Padding = UDim.new(0, 8)
 			tlLayout.Padding = UDim.new(0, 8)
 			trLayout.Padding = UDim.new(0, 8)
 		else
-			themeEditorPad.PaddingTop = UDim.new(0, 15)
+			themeEditorPad.PaddingTop = UDim.new(0, 4)
 			themeEditorPad.PaddingBottom = UDim.new(0, 15)
 			themeEditorLayout.Padding = UDim.new(0, 15)
 			tlLayout.Padding = UDim.new(0, 15)
@@ -6198,82 +2734,34 @@ function Library.CreateWindow(arg1, arg2)
 	table.insert(Window._styleCallbacks, updateThemeLayout)
 	updateThemeLayout(THEME.ElementStyle)
 
-	local editModeBlur = Instance.new("BlurEffect")
-	editModeBlur.Name = "AxiomEditBlur"
-	editModeBlur.Size = 0
-	editModeBlur.Parent = Lighting
-	table.insert(Window._connections, screenGui.Destroying:Connect(function()
-		editModeBlur:Destroy()
-	end))
 	local editModeLoop
-	local editorLayoutClock = 0
-	local editorToken = 0
-	local function placeEditor()
-		local viewport = screenGui.AbsoluteSize
-		if viewport.X <= 0 or viewport.Y <= 0 then return end
-		local compact = viewport.X < 850
-		local width = compact and math.min(360, viewport.X - 24) or math.min(520, math.max(300, viewport.X * 0.34))
-		local height = compact and math.min(370, viewport.Y * 0.47) or math.min(viewport.Y - 75, math.max(260, main.AbsoluteSize.Y - 16))
-		local rightX = main.AbsolutePosition.X + main.AbsoluteSize.X + 12
-		local leftX = main.AbsolutePosition.X - width - 12
-		local rightFits = rightX + width < viewport.X - 10
-		local leftFits = leftX > 10
-		local x
-		if editorDock == 1 and rightFits then x = rightX
-		elseif editorDock == 2 and leftFits then x = leftX
-		elseif editorDock == 3 then x = main.AbsolutePosition.X + main.AbsoluteSize.X * 0.5 - width * 0.5
-		elseif rightFits then x = rightX
-		elseif leftFits then x = leftX
-		else x = viewport.X - width - 12 end
-		x = math.clamp(x, 10, math.max(10, viewport.X - width - 10))
-		local y = math.clamp(main.AbsolutePosition.Y, 42, math.max(42, viewport.Y - height - 12))
-		if compact then y = math.max(42, viewport.Y - height - 12) end
-		editorBar.Position = UDim2.fromOffset(x, y - 37)
-		editorBar.Size = UDim2.fromOffset(width, 33)
-		themeEditorContainer.AnchorPoint = Vector2.new(0, 0)
-		themeEditorContainer.Size = UDim2.fromOffset(width, height)
-		themeEditorContainer.Position = UDim2.fromOffset(x, y)
-	end
 	Window.ToggleEditMode = function(state)
-		state = state == true
-		if Window.IsEditMode == state then return end
 		Window.IsEditMode = state
-		editorToken += 1
-		local token = editorToken
 		if state then
-			placeEditor()
-			editModeDim.Visible = true
-			editorBar.Visible = true
-			themeEditorContainer.Visible = true
-			local normal = isMobile and 0.65 or 1
-			teScale.Scale = normal * 0.95
-			TS:Create(teScale, TweenInfo.new(0.26, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {Scale = normal}):Play()
-			TS:Create(editModeDim, TweenInfo.new(0.3), {BackgroundTransparency = 0.43}):Play()
-			editModeLoop = RS.RenderStepped:Connect(function(dt)
+			editModeBackdrop.Visible = true
+			editModeBackdrop.BackgroundTransparency = 1
+			TS:Create(editModeBackdrop, TweenInfo.new(0.35, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {BackgroundTransparency = 0.4}):Play()
+			TS:Create(editModeBlur, TweenInfo.new(0.35, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Size = 20}):Play()
+			editModeLoop = RS.RenderStepped:Connect(function()
 				UIS.MouseIconEnabled = true
 				UIS.MouseBehavior = Enum.MouseBehavior.Default
-				editorLayoutClock += dt
-				if editorLayoutClock >= 0.08 then editorLayoutClock = 0; placeEditor() end
 			end)
 			CAS:BindAction("AxiomEditSink", function() return Enum.ContextActionResult.Sink end, false,
 				Enum.UserInputType.MouseButton2, Enum.UserInputType.MouseButton3,
-				Enum.KeyCode.W, Enum.KeyCode.A, Enum.KeyCode.S, Enum.KeyCode.D, Enum.KeyCode.Space)
-			TS:Create(editModeCC, TweenInfo.new(0.32), {Saturation = -0.12, Brightness = -0.16}):Play()
-			TS:Create(editModeBlur, TweenInfo.new(0.32), {Size = isMobile and 7 or 12}):Play()
+				Enum.KeyCode.W, Enum.KeyCode.A, Enum.KeyCode.S, Enum.KeyCode.D, Enum.KeyCode.Space
+			)
+			themeEditorFrame.Visible = true
 		else
 			if editModeLoop then editModeLoop:Disconnect(); editModeLoop = nil end
 			CAS:UnbindAction("AxiomEditSink")
-			TS:Create(editModeCC, TweenInfo.new(0.3), {Saturation = 0, Brightness = 0}):Play()
-			TS:Create(editModeBlur, TweenInfo.new(0.3), {Size = 0}):Play()
-			TS:Create(editModeDim, TweenInfo.new(0.3), {BackgroundTransparency = 1}):Play()
-			TS:Create(teScale, TweenInfo.new(0.22), {Scale = (isMobile and 0.65 or 1) * 0.96}):Play()
+			TS:Create(editModeBackdrop, TweenInfo.new(0.3, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {BackgroundTransparency = 1}):Play()
+			TS:Create(editModeBlur, TweenInfo.new(0.3, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Size = 0}):Play()
 			task.delay(0.3, function()
-				if token == editorToken then
-					themeEditorContainer.Visible = false
-					editorBar.Visible = false
-					editModeDim.Visible = false
+				if not Window.IsEditMode then
+					editModeBackdrop.Visible = false
 				end
 			end)
+			themeEditorFrame.Visible = false
 		end
 	end
 
@@ -6329,6 +2817,17 @@ function Library.CreateWindow(arg1, arg2)
 			elStroke.Parent = elContainer
 			ApplyTheme(elStroke, "Outlines", "Color")
 			CS:AddTag(elStroke, "ElementStroke")
+
+			table.insert(Window._connections, elContainer.MouseEnter:Connect(function()
+				TS:Create(elContainer, TweenInfo.new(0.2, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
+					BackgroundColor3 = THEME.ElementHover
+				}):Play()
+			end))
+			table.insert(Window._connections, elContainer.MouseLeave:Connect(function()
+				TS:Create(elContainer, TweenInfo.new(0.2, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
+					BackgroundColor3 = THEME.Element
+				}):Play()
+			end))
 
 			return elContainer
 		end
@@ -6591,10 +3090,10 @@ function Library.CreateWindow(arg1, arg2)
 				local absX = previewBox.AbsolutePosition.X - Window.Overlay.AbsolutePosition.X + previewBox.AbsoluteSize.X + 10
 				local absY = previewBox.AbsolutePosition.Y - Window.Overlay.AbsolutePosition.Y
 				popup.Parent = Window.Overlay
-				popup.Position = UDim2.new(0, absX, 0, absY)
+				popup.Position = UDim2.new(0, absX, 0, absY + 6)
 				Window.Overlay.Visible = true
 				Window.ActivePopup = popup
-				popup.Size = UDim2.new(0, 180 * 0.9, 0, 244 * 0.9)
+				popup.Size = UDim2.new(0, 180 * 0.92, 0, 244 * 0.92)
 				popup.GroupTransparency = 1
 				popup.Visible = true
 				if popupStroke then popupStroke.Transparency = 0 end
@@ -6602,8 +3101,8 @@ function Library.CreateWindow(arg1, arg2)
 					popupFadeToken = popupFadeToken + 1
 					local token = popupFadeToken
 					if popupTween then popupTween:Cancel() end
-					local fadeInfo = TweenInfo.new(0.18, Enum.EasingStyle.Cubic, Enum.EasingDirection.Out)
-					popupTween = TS:Create(popup, fadeInfo, {GroupTransparency = 1})
+					local fadeInfo = TweenInfo.new(0.2, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
+					popupTween = TS:Create(popup, fadeInfo, {GroupTransparency = 1, Position = UDim2.new(0, absX, 0, absY + 6), Size = UDim2.new(0, 180 * 0.92, 0, 244 * 0.92)})
 					popupTween:Play()
 					if popupStroke then
 						if popupStrokeTween then popupStrokeTween:Cancel() end
@@ -6617,8 +3116,9 @@ function Library.CreateWindow(arg1, arg2)
 						if not Window.ActivePopup then Window.Overlay.Visible = false end
 					end)
 				end
-				popupTween = TS:Create(popup, TweenInfo.new(0.2, Enum.EasingStyle.Cubic, Enum.EasingDirection.Out), {
+				popupTween = TS:Create(popup, TweenInfo.new(0.24, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
 					GroupTransparency = 0,
+					Position = UDim2.new(0, absX, 0, absY),
 					Size = UDim2.new(0, 180, 0, 244)
 				})
 				popupTween:Play()
@@ -6956,11 +3456,11 @@ function Library.CreateWindow(arg1, arg2)
 					CS:AddTag(btnCorner, "ElementCorner")
 
 					table.insert(Window._connections, btn.MouseEnter:Connect(function() 
-						TS:Create(btn, TweenInfo.new(0.15), {BackgroundTransparency = THEME.ElementTrans}):Play()
+						TS:Create(btn, TweenInfo.new(0.18, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {BackgroundTransparency = THEME.ElementTrans}):Play()
 						ApplyTheme(btn, "ElementHover", "BackgroundColor3")
 					end))
 					table.insert(Window._connections, btn.MouseLeave:Connect(function() 
-						TS:Create(btn, TweenInfo.new(0.15), {BackgroundTransparency = 1}):Play()
+						TS:Create(btn, TweenInfo.new(0.18, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {BackgroundTransparency = 1}):Play()
 					end))
 					table.insert(Window._connections, btn.MouseButton1Click:Connect(function()
 						if isMulti then
@@ -7103,13 +3603,13 @@ function Library.CreateWindow(arg1, arg2)
 						dropTrackConn = nil
 					end
 					
-					local closeTween = TS:Create(dropPopup, TweenInfo.new(0.2, Enum.EasingStyle.Cubic, Enum.EasingDirection.Out), {
+					local closeTween = TS:Create(dropPopup, TweenInfo.new(0.2, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
 						Size = UDim2.new(0, boxW, 0, boxH)
 					})
 					closeTween:Play()
 					
-					TS:Create(arrow, TweenInfo.new(0.2, Enum.EasingStyle.Cubic, Enum.EasingDirection.Out), {Rotation = 180}):Play()
-					TS:Create(headerArrow, TweenInfo.new(0.2, Enum.EasingStyle.Cubic, Enum.EasingDirection.Out), {Rotation = 180}):Play()
+					TS:Create(arrow, TweenInfo.new(0.2, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Rotation = 180}):Play()
+					TS:Create(headerArrow, TweenInfo.new(0.2, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Rotation = 180}):Play()
 					
 					local conn
 					conn = closeTween.Completed:Connect(function()
@@ -7125,14 +3625,14 @@ function Library.CreateWindow(arg1, arg2)
 					end)
 				end
 
-				TS:Create(dropPopup, TweenInfo.new(0.22, Enum.EasingStyle.Cubic, Enum.EasingDirection.Out), {
+				TS:Create(dropPopup, TweenInfo.new(0.24, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
 					Size = UDim2.new(0, boxW, 0, targetH)
 				}):Play()
 				
 				headerArrow.Rotation = 180
 				arrow.Rotation = 180
-				TS:Create(arrow, TweenInfo.new(0.22, Enum.EasingStyle.Cubic, Enum.EasingDirection.Out), {Rotation = 0}):Play()
-				TS:Create(headerArrow, TweenInfo.new(0.22, Enum.EasingStyle.Cubic, Enum.EasingDirection.Out), {Rotation = 0}):Play()
+				TS:Create(arrow, TweenInfo.new(0.24, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Rotation = 0}):Play()
+				TS:Create(headerArrow, TweenInfo.new(0.24, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Rotation = 0}):Play()
 			end))
 			RegisterElement(dropName, container)
 			
@@ -7830,10 +4330,10 @@ function Library.CreateWindow(arg1, arg2)
 			updateStyle(THEME.ElementStyle)
 
 			table.insert(Window._connections, btnInteractive.MouseButton1Down:Connect(function()
-				ApplyTheme(btn, "CardHover", "BackgroundColor3")
+				TS:Create(btn, TweenInfo.new(0.12, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {BackgroundColor3 = THEME.CardHover}):Play()
 			end))
 			table.insert(Window._connections, btnInteractive.MouseButton1Up:Connect(function()
-				ApplyTheme(btn, "Element", "BackgroundColor3")
+				TS:Create(btn, TweenInfo.new(0.18, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {BackgroundColor3 = THEME.Element}):Play()
 				callback()
 			end))
 			RegisterElement(btnName, btn)
@@ -7944,10 +4444,10 @@ function Library.CreateWindow(arg1, arg2)
 			updateStyle(THEME.ElementStyle)
 
 			table.insert(Window._connections, btnInteractive.MouseButton1Down:Connect(function()
-				ApplyTheme(el, "CardHover", "BackgroundColor3")
+				TS:Create(el, TweenInfo.new(0.12, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {BackgroundColor3 = THEME.CardHover}):Play()
 			end))
 			table.insert(Window._connections, btnInteractive.MouseButton1Up:Connect(function()
-				ApplyTheme(el, "Element", "BackgroundColor3")
+				TS:Create(el, TweenInfo.new(0.18, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {BackgroundColor3 = THEME.Element}):Play()
 				callback()
 			end))
 			
@@ -8315,10 +4815,10 @@ function Library.CreateWindow(arg1, arg2)
 			local function updateToggle()
 				if state then
 					ApplyTheme(toggleStroke, "Accent", "Color")
-					TS:Create(fill, TweenInfo.new(0.2, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {Size = UDim2.new(1, -10, 1, -10)}):Play()
+					TS:Create(fill, TweenInfo.new(0.24, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Size = UDim2.new(1, -10, 1, -10)}):Play()
 				else
 					ApplyTheme(toggleStroke, "Outlines", "Color")
-					TS:Create(fill, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Size = UDim2.new(0, 0, 0, 0)}):Play()
+					TS:Create(fill, TweenInfo.new(0.24, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Size = UDim2.new(0, 0, 0, 0)}):Play()
 				end
 				fireCallback()
 				if Window.UpdateKeybinds then Window.UpdateKeybinds() end
@@ -8646,7 +5146,14 @@ function Library.CreateWindow(arg1, arg2)
 			local trackCorner = Instance.new("UICorner")
 			trackCorner.CornerRadius = UDim.new(1, 0)
 			trackCorner.Parent = track
-			attachStroke(track, "ElementStroke")
+
+			local trackStroke = Instance.new("UIStroke")
+			trackStroke.Name = "TrackStroke"
+			trackStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+			trackStroke.Thickness = 1
+			trackStroke.Parent = track
+			ApplyTheme(trackStroke, "Outlines", "Color")
+			CS:AddTag(trackStroke, "ElementStroke")
 
 			local fill = Instance.new("Frame")
 			fill.Name = "Fill"
@@ -8740,8 +5247,8 @@ function Library.CreateWindow(arg1, arg2)
 				currentValue = steppedValue
 				valueInput.Text = formatVal(steppedValue)
 				local alpha = math.clamp((steppedValue - min) / (max - min), 0, 1)
-				TS:Create(fill, TweenInfo.new(0.1), {Size = UDim2.new(alpha, 0, 1, 0)}):Play()
-				TS:Create(knob, TweenInfo.new(0.1), {Position = UDim2.new(alpha, 0, 0.5, 0)}):Play()
+				TS:Create(fill, TweenInfo.new(0.12, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Size = UDim2.new(alpha, 0, 1, 0)}):Play()
+				TS:Create(knob, TweenInfo.new(0.12, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Position = UDim2.new(alpha, 0, 0.5, 0)}):Play()
 				callback(steppedValue)
 			end
 
@@ -8771,8 +5278,8 @@ function Library.CreateWindow(arg1, arg2)
 					currentValue = steppedValue
 					valueInput.Text = formatVal(steppedValue)
 					local alpha = math.clamp((steppedValue - min) / (max - min), 0, 1)
-					TS:Create(fill, TweenInfo.new(0.2), {Size = UDim2.new(alpha, 0, 1, 0)}):Play()
-					TS:Create(knob, TweenInfo.new(0.2), {Position = UDim2.new(alpha, 0, 0.5, 0)}):Play()
+					TS:Create(fill, TweenInfo.new(0.24, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Size = UDim2.new(alpha, 0, 1, 0)}):Play()
+					TS:Create(knob, TweenInfo.new(0.24, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Position = UDim2.new(alpha, 0, 0.5, 0)}):Play()
 					callback(steppedValue)
 				else
 					currentValue = min
@@ -8791,8 +5298,8 @@ function Library.CreateWindow(arg1, arg2)
 				currentValue = steppedValue
 				valueInput.Text = formatVal(steppedValue)
 				local alpha = math.clamp((steppedValue - min) / (max - min), 0, 1)
-				fill.Size = UDim2.new(alpha, 0, 1, 0)
-				knob.Position = UDim2.new(alpha, 0, 0.5, 0)
+				TS:Create(fill, TweenInfo.new(0.24, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Size = UDim2.new(alpha, 0, 1, 0)}):Play()
+				TS:Create(knob, TweenInfo.new(0.24, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Position = UDim2.new(alpha, 0, 0.5, 0)}):Play()
 				callback(steppedValue)
 			end
 			function api:Save()
@@ -8806,143 +5313,297 @@ function Library.CreateWindow(arg1, arg2)
 			RegisterElementAPI("Slider", slName, api)
 			return api
 		end
-		
-		function BlockObj:CreateRangeSlider(cfg)
-			cfg = cfg or {}
-			local name = cfg.Name or cfg.Title or "Range Slider"
-			local min = tonumber(cfg.Min) or 0
-			local max = tonumber(cfg.Max) or 100
-			if max <= min then max = min + 1 end
-			local step = math.max(tonumber(cfg.Step) or 1, 0.000001)
-			local defaults = cfg.Default or {min, max}
-			local callback = cfg.Callback or function() end
-			local low, high = min, max
-			local container = CreateElementBase(54)
-			local title = Instance.new("TextLabel")
-			title.Name = "RangeLabel"
-			title.BackgroundTransparency = 1
-			title.Size = UDim2.new(0.58, 0, 0, 22)
-			title.Position = UDim2.fromOffset(12, 2)
-			title.TextXAlignment = Enum.TextXAlignment.Left
-			title.TextSize = 12
-			title.Text = name
-			title.Parent = container
-			ApplyTheme(title, "Text", "TextColor3")
-			ApplyTheme(title, "TextFont", "Font")
-			local valueLabel = Instance.new("TextLabel")
-			valueLabel.Name = "RangeValues"
-			valueLabel.BackgroundTransparency = 1
-			valueLabel.Size = UDim2.new(0.42, -12, 0, 22)
-			valueLabel.Position = UDim2.new(0.58, 0, 0, 2)
-			valueLabel.TextXAlignment = Enum.TextXAlignment.Right
-			valueLabel.TextSize = 12
-			valueLabel.Parent = container
-			ApplyTheme(valueLabel, "TextMuted", "TextColor3")
+
+		function BlockObj:CreateRangeSlider(rsConfig)
+			local rsName = rsConfig.Name or "Range Slider"
+			local min = rsConfig.Min or 0
+			local max = rsConfig.Max or 100
+			local rawStep = rsConfig.Step or 1
+			local step = (type(rawStep) == "number" and rawStep > 0) and rawStep or 1
+
+			local stepStr = tostring(step)
+			local decimals = 0
+			local exp = stepStr:match("[eE]%-(%d+)")
+			if exp then
+				local mantissa = stepStr:match("^(.-)[eE]")
+				local mantissaDecs = (mantissa and mantissa:find("%.")) and #mantissa:split(".")[2] or 0
+				decimals = tonumber(exp) + mantissaDecs
+			elseif stepStr:find("%.") then
+				decimals = #stepStr:split(".")[2]
+			end
+			decimals = math.clamp(decimals, 0, 14)
+
+			local function roundVal(val)
+				val = math.clamp(val, min, max)
+				local snapped = math.round(val / step) * step
+				return tonumber(string.format("%." .. decimals .. "f", snapped)) or snapped
+			end
+
+			local function formatVal(val)
+				return string.format("%." .. decimals .. "f", val)
+			end
+
+			local def = rsConfig.Default
+			local defMin = min
+			local defMax = max
+			if type(def) == "table" then
+				defMin = def.Min or def[1] or min
+				defMax = def.Max or def[2] or max
+			end
+			local currentMin = roundVal(defMin)
+			local currentMax = roundVal(defMax)
+			if currentMin > currentMax then currentMin, currentMax = currentMax, currentMin end
+			local callback = rsConfig.Callback or function() end
+
+			local container = CreateElementBase(38)
+
+			local label = Instance.new("TextLabel")
+			label.Name = "RangeLabel"
+			label.Size = UDim2.new(0.32, 0, 1, 0)
+			label.Position = UDim2.new(0, 15, 0, 0)
+			label.BackgroundTransparency = 1
+			label.TextSize = 13
+			label.TextTruncate = Enum.TextTruncate.AtEnd
+			label.TextXAlignment = Enum.TextXAlignment.Left
+			label.Text = rsName
+			label.Font = Enum.Font.Gotham
+			label.Parent = container
+			ApplyTheme(label, "Text", "TextColor3")
+			ApplyTheme(label, "TextFont", "Font")
+
+			local valueBox = Instance.new("Frame")
+			valueBox.Name = "ValueBox"
+			valueBox.Size = UDim2.new(0, 72, 0, 24)
+			valueBox.AnchorPoint = Vector2.new(1, 0.5)
+			valueBox.Position = UDim2.new(1, -7, 0.5, 0)
+			valueBox.BorderSizePixel = 0
+			valueBox.Parent = container
+			ApplyTheme(valueBox, "Input", "BackgroundColor3")
+			ApplyTheme(valueBox, "InputTrans", "BackgroundTransparency")
+			
+			local valueBoxCorner = Instance.new("UICorner")
+			valueBoxCorner.CornerRadius = GLOBAL_CORNER
+			valueBoxCorner.Parent = valueBox
+			CS:AddTag(valueBoxCorner, "ElementCorner")
+			attachStroke(valueBox, "ElementStroke")
+
+			local valueDisplay = Instance.new("TextLabel")
+			valueDisplay.Name = "ValueDisplay"
+			valueDisplay.Size = UDim2.new(1, 0, 1, 0)
+			valueDisplay.BackgroundTransparency = 1
+			valueDisplay.TextSize = 11
+			valueDisplay.Text = formatVal(currentMin) .. " - " .. formatVal(currentMax)
+			valueDisplay.TextTruncate = Enum.TextTruncate.AtEnd
+			valueDisplay.Font = Enum.Font.Gotham
+			valueDisplay.Parent = valueBox
+			ApplyTheme(valueDisplay, "Text", "TextColor3")
+			ApplyTheme(valueDisplay, "TextFont", "Font")
+
 			local track = Instance.new("Frame")
-			track.Name = "RangeTrack"
-			track.Size = UDim2.new(1, -26, 0, 6)
-			track.Position = UDim2.new(0, 13, 0, 36)
+			track.Name = "Track"
+			track.Size = UDim2.new(0.52, -84, 0, 6)
+			track.AnchorPoint = Vector2.new(1, 0.5)
+			track.Position = UDim2.new(1, -84, 0.5, 0)
 			track.BorderSizePixel = 0
 			track.Parent = container
 			ApplyTheme(track, "Input", "BackgroundColor3")
-			local tc = Instance.new("UICorner")
-			tc.CornerRadius = UDim.new(1, 0)
-			tc.Parent = track
-			attachStroke(track, "ElementStroke")
+			ApplyTheme(track, "InputTrans", "BackgroundTransparency")
+
+			local trackCorner = Instance.new("UICorner")
+			trackCorner.CornerRadius = UDim.new(1, 0)
+			trackCorner.Parent = track
+
+			local trackStroke = Instance.new("UIStroke")
+			trackStroke.Name = "TrackStroke"
+			trackStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+			trackStroke.Thickness = 1
+			trackStroke.Parent = track
+			ApplyTheme(trackStroke, "Outlines", "Color")
+			CS:AddTag(trackStroke, "ElementStroke")
+
+			local alpha1 = math.clamp((currentMin - min) / (max - min), 0, 1)
+			local alpha2 = math.clamp((currentMax - min) / (max - min), 0, 1)
+
 			local fill = Instance.new("Frame")
-			fill.Name = "SelectedRange"
+			fill.Name = "Fill"
+			fill.Position = UDim2.new(alpha1, 0, 0, 0)
+			fill.Size = UDim2.new(math.max(0, alpha2 - alpha1), 0, 1, 0)
 			fill.BorderSizePixel = 0
 			fill.Parent = track
 			ApplyTheme(fill, "Accent", "BackgroundColor3")
-			local fc = Instance.new("UICorner")
-			fc.CornerRadius = UDim.new(1, 0)
-			fc.Parent = fill
-			local knobs = {}
-			for i = 1, 2 do
-				local knob = Instance.new("TextButton")
-				knob.Name = i == 1 and "MinHandle" or "MaxHandle"
-				knob.Text = ""
-				knob.Size = UDim2.fromOffset(14, 14)
-				knob.AnchorPoint = Vector2.new(0.5, 0.5)
-				knob.ZIndex = 5 + i
-				knob.Parent = track
-				ApplyTheme(knob, "Accent", "BackgroundColor3")
-				local corner = Instance.new("UICorner")
-				corner.CornerRadius = UDim.new(1, 0)
-				corner.Parent = knob
-				local stroke = Instance.new("UIStroke")
-				stroke.Thickness = 1.5
-				stroke.Color = Color3.new(1, 1, 1)
-				stroke.Parent = knob
-				knobs[i] = knob
-			end
-			local function snap(value)
-				return math.clamp(min + math.round((math.clamp(tonumber(value) or min, min, max) - min) / step) * step, min, max)
-			end
-			local function redraw(animate)
-				local a = (low - min) / (max - min)
-				local b = (high - min) / (max - min)
-				local targets = {UDim2.new(a, 0, 0.5, 0), UDim2.new(b, 0, 0.5, 0)}
-				local fillPos = UDim2.new(a, 0, 0, 0)
-				local fillSize = UDim2.new(b - a, 0, 1, 0)
-				if animate then
-					for i, knob in ipairs(knobs) do TS:Create(knob, TweenInfo.new(0.09), {Position = targets[i]}):Play() end
-					TS:Create(fill, TweenInfo.new(0.09), {Position = fillPos, Size = fillSize}):Play()
-				else
-					for i, knob in ipairs(knobs) do knob.Position = targets[i] end
-					fill.Position = fillPos
-					fill.Size = fillSize
+
+			local fillCorner = Instance.new("UICorner")
+			fillCorner.CornerRadius = UDim.new(1, 0)
+			fillCorner.Parent = fill
+
+			local knob1 = Instance.new("Frame")
+			knob1.Name = "KnobMin"
+			knob1.Size = UDim2.new(0, 12, 0, 12)
+			knob1.AnchorPoint = Vector2.new(0.5, 0.5)
+			knob1.Position = UDim2.new(alpha1, 0, 0.5, 0)
+			knob1.BorderSizePixel = 0
+			knob1.ZIndex = 3
+			knob1.Parent = track
+			ApplyTheme(knob1, "Accent", "BackgroundColor3")
+
+			local k1Corner = Instance.new("UICorner")
+			k1Corner.CornerRadius = UDim.new(1, 0)
+			k1Corner.Parent = knob1
+
+			local k1Stroke = Instance.new("UIStroke")
+			k1Stroke.Thickness = 1.5
+			k1Stroke.Color = Color3.fromRGB(255, 255, 255)
+			k1Stroke.Parent = knob1
+
+			local knob2 = Instance.new("Frame")
+			knob2.Name = "KnobMax"
+			knob2.Size = UDim2.new(0, 12, 0, 12)
+			knob2.AnchorPoint = Vector2.new(0.5, 0.5)
+			knob2.Position = UDim2.new(alpha2, 0, 0.5, 0)
+			knob2.BorderSizePixel = 0
+			knob2.ZIndex = 3
+			knob2.Parent = track
+			ApplyTheme(knob2, "Accent", "BackgroundColor3")
+
+			local k2Corner = Instance.new("UICorner")
+			k2Corner.CornerRadius = UDim.new(1, 0)
+			k2Corner.Parent = knob2
+
+			local k2Stroke = Instance.new("UIStroke")
+			k2Stroke.Thickness = 1.5
+			k2Stroke.Color = Color3.fromRGB(255, 255, 255)
+			k2Stroke.Parent = knob2
+
+			local function updateStyle(style)
+				if style == 1 then
+					container.Size = UDim2.new(1, 0, 0, 38)
+					label.Size = UDim2.new(0.32, 0, 1, 0)
+					label.Position = UDim2.new(0, 15, 0, 0)
+					label.TextSize = 13
+					valueBox.Size = UDim2.new(0, 72, 0, 24)
+					valueBox.AnchorPoint = Vector2.new(1, 0.5)
+					valueBox.Position = UDim2.new(1, -7, 0.5, 0)
+					track.Size = UDim2.new(0.52, -84, 0, 6)
+					track.AnchorPoint = Vector2.new(1, 0.5)
+					track.Position = UDim2.new(1, -84, 0.5, 0)
+					knob1.Size = UDim2.new(0, 12, 0, 12)
+					knob2.Size = UDim2.new(0, 12, 0, 12)
+				elseif style == 2 then
+					container.Size = UDim2.new(1, 0, 0, 44)
+					label.Size = UDim2.new(0.5, 0, 0, 16)
+					label.Position = UDim2.new(0, 12, 0, 6)
+					label.TextSize = 13
+					valueBox.Size = UDim2.new(0, 72, 0, 20)
+					valueBox.AnchorPoint = Vector2.new(1, 0)
+					valueBox.Position = UDim2.new(1, -12, 0, 4)
+					track.Size = UDim2.new(1, -24, 0, 6)
+					track.AnchorPoint = Vector2.new(0.5, 0)
+					track.Position = UDim2.new(0.5, 0, 0, 28)
+					knob1.Size = UDim2.new(0, 12, 0, 12)
+					knob2.Size = UDim2.new(0, 12, 0, 12)
+				elseif style == 3 then
+					container.Size = UDim2.new(1, 0, 0, 30)
+					label.Size = UDim2.new(0.32, 0, 1, 0)
+					label.Position = UDim2.new(0, 15, 0, 0)
+					label.TextSize = 12
+					valueBox.Size = UDim2.new(0, 68, 0, 20)
+					valueBox.AnchorPoint = Vector2.new(1, 0.5)
+					valueBox.Position = UDim2.new(1, -5, 0.5, 0)
+					track.Size = UDim2.new(0.52, -80, 0, 4)
+					track.AnchorPoint = Vector2.new(1, 0.5)
+					track.Position = UDim2.new(1, -77, 0.5, 0)
+					knob1.Size = UDim2.new(0, 10, 0, 10)
+					knob2.Size = UDim2.new(0, 10, 0, 10)
+				elseif style == 4 then
+					container.Size = UDim2.new(1, 0, 0, 38)
+					label.Size = UDim2.new(0.5, 0, 0, 14)
+					label.Position = UDim2.new(0, 12, 0, 4)
+					label.TextSize = 12
+					valueBox.Size = UDim2.new(0, 68, 0, 18)
+					valueBox.AnchorPoint = Vector2.new(1, 0)
+					valueBox.Position = UDim2.new(1, -12, 0, 3)
+					track.Size = UDim2.new(1, -24, 0, 4)
+					track.AnchorPoint = Vector2.new(0.5, 0)
+					track.Position = UDim2.new(0.5, 0, 0, 24)
+					knob1.Size = UDim2.new(0, 10, 0, 10)
+					knob2.Size = UDim2.new(0, 10, 0, 10)
 				end
-				valueLabel.Text = tostring(low) .. " - " .. tostring(high)
 			end
-			local api = {}
-			function api:Set(a, b)
-				if type(a) == "table" then b = a[2] or a.Max; a = a[1] or a.Min end
-				local newLow = snap(a or low)
-				local newHigh = snap(b or high)
-				if newLow > newHigh then newLow, newHigh = newHigh, newLow end
-				if low == newLow and high == newHigh then return end
-				low, high = newLow, newHigh
-				redraw(true)
-				callback(low, high)
+			table.insert(Window._styleCallbacks, updateStyle)
+			updateStyle(THEME.ElementStyle)
+
+			local draggingKnob = nil
+			local function applyVisuals()
+				local a1 = math.clamp((currentMin - min) / (max - min), 0, 1)
+				local a2 = math.clamp((currentMax - min) / (max - min), 0, 1)
+				valueDisplay.Text = formatVal(currentMin) .. " - " .. formatVal(currentMax)
+				TS:Create(knob1, TweenInfo.new(0.12, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Position = UDim2.new(a1, 0, 0.5, 0)}):Play()
+				TS:Create(knob2, TweenInfo.new(0.12, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Position = UDim2.new(a2, 0, 0.5, 0)}):Play()
+				TS:Create(fill, TweenInfo.new(0.12, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
+					Position = UDim2.new(a1, 0, 0, 0),
+					Size = UDim2.new(math.max(0, a2 - a1), 0, 1, 0)
+				}):Play()
+				callback(currentMin, currentMax)
 			end
-			function api:Get() return low, high end
-			function api:Save() return {Min = low, Max = high} end
-			function api:Load(data)
-				if type(data) == "table" then self:Set(data.Min or data[1], data.Max or data[2]) end
+
+			local function updateDrag(inputX)
+				local rel = math.clamp((inputX - track.AbsolutePosition.X) / track.AbsoluteSize.X, 0, 1)
+				local val = roundVal(min + ((max - min) * rel))
+				if draggingKnob == 1 then
+					currentMin = math.clamp(val, min, currentMax)
+				elseif draggingKnob == 2 then
+					currentMax = math.clamp(val, currentMin, max)
+				end
+				applyVisuals()
 			end
-			local active = nil
-			local function move(x)
-				if not active or track.AbsoluteSize.X <= 0 then return end
-				local value = snap(min + math.clamp((x - track.AbsolutePosition.X) / track.AbsoluteSize.X, 0, 1) * (max - min))
-				if active == 1 then api:Set(math.min(value, high), high) else api:Set(low, math.max(value, low)) end
-			end
-			for i, knob in ipairs(knobs) do
-				table.insert(Window._connections, knob.InputBegan:Connect(function(input)
-					if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then active = i; move(input.Position.X) end
-				end))
-			end
+
 			table.insert(Window._connections, track.InputBegan:Connect(function(input)
 				if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-					local value = min + math.clamp((input.Position.X - track.AbsolutePosition.X) / math.max(track.AbsoluteSize.X, 1), 0, 1) * (max - min)
-					active = math.abs(value - low) <= math.abs(value - high) and 1 or 2
-					move(input.Position.X)
+					local rel = math.clamp((input.Position.X - track.AbsolutePosition.X) / track.AbsoluteSize.X, 0, 1)
+					local a1 = (currentMin - min) / (max - min)
+					local a2 = (currentMax - min) / (max - min)
+					if math.abs(rel - a1) <= math.abs(rel - a2) then
+						draggingKnob = 1
+					else
+						draggingKnob = 2
+					end
+					updateDrag(input.Position.X)
 				end
 			end))
+
 			table.insert(Window._connections, UIS.InputChanged:Connect(function(input)
-				if active and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then move(input.Position.X) end
+				if draggingKnob and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+					updateDrag(input.Position.X)
+				end
 			end))
+
 			table.insert(Window._connections, UIS.InputEnded:Connect(function(input)
-				if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then active = nil end
+				if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+					draggingKnob = nil
+				end
 			end))
-			low, high = snap(defaults[1] or defaults.Min or min), snap(defaults[2] or defaults.Max or max)
-			if low > high then low, high = high, low end
-			redraw(false)
-			RegisterElement(name, container)
-			RegisterElementAPI("RangeSlider", name, api)
+
+			RegisterElement(rsName, container)
+
+			local api = {}
+			function api:Set(newMin, newMax)
+				currentMin = roundVal(newMin)
+				currentMax = roundVal(newMax)
+				if currentMin > currentMax then currentMin, currentMax = currentMax, currentMin end
+				applyVisuals()
+			end
+			function api:Save()
+				return { Min = currentMin, Max = currentMax }
+			end
+			function api:Load(val)
+				if val.Min ~= nil and val.Max ~= nil then
+					api:Set(val.Min, val.Max)
+				end
+			end
+			RegisterElementAPI("RangeSlider", rsName, api)
 			return api
 		end
-
+		
 		function BlockObj:CreateColorpicker(cpConfig)
 			local cpName = cpConfig.Name or "Colorpicker"
 			local defaultColor = cpConfig.Default or Color3.fromRGB(255, 255, 255)
@@ -9419,11 +6080,11 @@ function Library.CreateWindow(arg1, arg2)
 		ApplyTheme(tabBtnTitle, "TextFont", "Font")
 	
 		local page = Instance.new("CanvasGroup")
-		page.GroupTransparency = 1
 		page.Name = "Page_" .. name
 		page.Size = UDim2.new(1, 0, 1, 0)
 		page.Position = UDim2.new(0, 0, 0, 0)
 		page.BackgroundTransparency = 1
+		page.GroupTransparency = 1
 		page.Visible = false
 		page.Parent = pagesFolder
 	
@@ -9535,8 +6196,7 @@ function Library.CreateWindow(arg1, arg2)
 			local collapsedNow = (currentSidebarWidth < 115)
 	
 			if prevTab then
-				prevTab.Page.ZIndex = 6
-				TS:Create(prevTab.Stroke, TweenInfo.new(0.3), {Transparency = 1}):Play()
+				TS:Create(prevTab.Stroke, TweenInfo.new(0.24, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Transparency = 1}):Play()
 				ApplyTheme(prevTab.Stroke, "Outlines", "Color")
 				
 				ApplyTheme(prevTab.Label, "TextMuted", "TextColor3")
@@ -9544,24 +6204,25 @@ function Library.CreateWindow(arg1, arg2)
 				if prevTab.LetterLabel then ApplyTheme(prevTab.LetterLabel, "TextMuted", "TextColor3") end
 				
 				if not isTopOrBottom and not collapsedNow then 
-					TS:Create(prevTab.Padding, TweenInfo.new(0.3), {PaddingLeft = UDim.new(0, 15)}):Play() 
+					TS:Create(prevTab.Padding, TweenInfo.new(0.24, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {PaddingLeft = UDim.new(0, 15)}):Play() 
 				else
-					TS:Create(prevTab.Padding, TweenInfo.new(0.3), {PaddingLeft = UDim.new(0, 0)}):Play()
+					TS:Create(prevTab.Padding, TweenInfo.new(0.24, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {PaddingLeft = UDim.new(0, 0)}):Play()
 				end
 	
-				if motionConfig then
-					local oldPage = prevTab.Page
-					local fade = TS:Create(oldPage, TweenInfo.new(motionDuration * 0.58, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {GroupTransparency = 1})
-					fade:Play()
-					fade.Completed:Once(function()
-						if Window.CurrentTab ~= prevTab then oldPage.Visible = false end
-					end)
-				else
-					prevTab.Page.Visible = false
-				end
+				local oldPage = prevTab.Page
+				local fadeOut = TS:Create(oldPage, TweenInfo.new(0.2, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
+					GroupTransparency = 1,
+					Position = UDim2.new(0, 0, 0, -8)
+				})
+				fadeOut:Play()
+				fadeOut.Completed:Once(function()
+					if Window.CurrentTab ~= prevTab then
+						oldPage.Visible = false
+					end
+				end)
 			end
 	
-			TS:Create(tabStroke, TweenInfo.new(0.3), {Transparency = 0}):Play()
+			TS:Create(tabStroke, TweenInfo.new(0.24, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Transparency = 0}):Play()
 			ApplyTheme(tabStroke, "Accent", "Color")
 			
 			ApplyTheme(tabBtnTitle, "Text", "TextColor3")
@@ -9569,20 +6230,18 @@ function Library.CreateWindow(arg1, arg2)
 			if tabLetterLabel then ApplyTheme(tabLetterLabel, "Accent", "TextColor3") end
 			
 			if not isTopOrBottom and not collapsedNow then 
-				TS:Create(tabBtnPadding, TweenInfo.new(0.3, Enum.EasingStyle.Cubic, Enum.EasingDirection.Out), {PaddingLeft = UDim.new(0, 22)}):Play() 
+				TS:Create(tabBtnPadding, TweenInfo.new(0.24, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {PaddingLeft = UDim.new(0, 22)}):Play() 
 			else
-				TS:Create(tabBtnPadding, TweenInfo.new(0.3, Enum.EasingStyle.Cubic, Enum.EasingDirection.Out), {PaddingLeft = UDim.new(0, 0)}):Play() 
+				TS:Create(tabBtnPadding, TweenInfo.new(0.24, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {PaddingLeft = UDim.new(0, 0)}):Play() 
 			end
 	
-			page.Position = UDim2.new(0, 0, 0, motionConfig and 14 or 0)
-			page.ZIndex = 7
-			page.GroupTransparency = motionConfig and 1 or 0
+			page.Position = UDim2.new(0, 0, 0, 8)
+			page.GroupTransparency = 1
 			page.Visible = true
-			if motionConfig then
-				TS:Create(page, TweenInfo.new(motionDuration, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
-					Position = UDim2.new(0, 0, 0, 0), GroupTransparency = 0
-				}):Play()
-			end
+			TS:Create(page, TweenInfo.new(0.26, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
+				GroupTransparency = 0,
+				Position = UDim2.new(0, 0, 0, 0)
+			}):Play()
 		end
 		
 		table.insert(Window._connections, tabButton.MouseButton1Click:Connect(activateTab))
@@ -9693,18 +6352,21 @@ function Library.CreateWindow(arg1, arg2)
 			ApplyTheme(detachBtn, "Text", "ImageColor3")
 
 			local isDetached = false
-			local detachedPosition = nil
 			local dragTriggers = {}
 			local activeDragConns = {}
 
-			local function ToggleDetach()
+			local function ToggleDetach(customPos)
 				isDetached = not isDetached
 				if isDetached then
 					local absPos = blockContainer.AbsolutePosition
 					local absSize = blockContainer.AbsoluteSize
 					
 					blockContainer.Size = UDim2.new(0, absSize.X, 0, 0)
-					blockContainer.Position = detachedPosition or UDim2.new(0, absPos.X, 0, absPos.Y + 15)
+					if customPos and type(customPos) == "table" then
+						blockContainer.Position = UDim2.new(customPos.ScaleX or 0, customPos.OffsetX or 0, customPos.ScaleY or 0, customPos.OffsetY or 0)
+					else
+						blockContainer.Position = UDim2.new(0, absPos.X, 0, absPos.Y + 15)
+					end
 					blockContainer.Parent = screenGui
 
 					ApplyTheme(blockContainer, "Background", "BackgroundColor3")
@@ -9732,7 +6394,6 @@ function Library.CreateWindow(arg1, arg2)
 						if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
 							local delta = input.Position - dragStart
 							blockContainer.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
-							detachedPosition = blockContainer.Position
 						end
 					end)
 					table.insert(activeDragConns, conn2)
@@ -9743,7 +6404,6 @@ function Library.CreateWindow(arg1, arg2)
 						end
 					end)
 					table.insert(activeDragConns, conn3)
-					
 				else
 					for _, c in ipairs(activeDragConns) do c:Disconnect() end
 					activeDragConns = {}
@@ -9761,25 +6421,30 @@ function Library.CreateWindow(arg1, arg2)
 				end
 			end
 
-			Window._configElements["__AxiomDetached~" .. tostring(tabData.Name or "Tab") .. "~" .. bSide .. "~" .. bName] = {
-				Type = "DetachedBlock",
-				API = {
-					Save = function()
-						local pos = isDetached and blockContainer.Position or detachedPosition
-						return {Detached = isDetached, Position = pos and {pos.X.Scale, pos.X.Offset, pos.Y.Scale, pos.Y.Offset} or nil}
-					end,
-					Load = function(_, data)
-						if type(data) ~= "table" then return end
-						if type(data.Position) == "table" and #data.Position == 4 then
-							detachedPosition = UDim2.new(unpack(data.Position))
-						end
-						if type(data.Detached) == "boolean" and data.Detached ~= isDetached then ToggleDetach() end
-						if isDetached and detachedPosition then blockContainer.Position = detachedPosition end
+			detachBtn.MouseButton1Click:Connect(function() ToggleDetach() end)
+			dummyReturnBtn.MouseButton1Click:Connect(function() ToggleDetach() end)
+
+			local blockUniqueKey = name .. "~" .. bName
+			Window._blockRegistry[blockUniqueKey] = {
+				IsDetached = function() return isDetached end,
+				GetPosition = function()
+					return {
+						ScaleX = blockContainer.Position.X.Scale,
+						OffsetX = blockContainer.Position.X.Offset,
+						ScaleY = blockContainer.Position.Y.Scale,
+						OffsetY = blockContainer.Position.Y.Offset
+					}
+				end,
+				SetDetached = function(targetState, posData)
+					if targetState and not isDetached then
+						ToggleDetach(posData)
+					elseif not targetState and isDetached then
+						ToggleDetach()
+					elseif targetState and isDetached and posData then
+						blockContainer.Position = UDim2.new(posData.ScaleX or 0, posData.OffsetX or 0, posData.ScaleY or 0, posData.OffsetY or 0)
 					end
-				}
+				end
 			}
-			detachBtn.MouseButton1Click:Connect(ToggleDetach)
-			dummyReturnBtn.MouseButton1Click:Connect(ToggleDetach)
 
 			if variants and type(variants) == "table" and #variants > 1 then
 				local headerWrapper = Instance.new("Frame")
@@ -9902,15 +6567,14 @@ function Library.CreateWindow(arg1, arg2)
 					}
 
 					local contentFrame = Instance.new("CanvasGroup")
-					contentFrame.GroupTransparency = i == 1 and 0 or 1
 					contentFrame.Name = "Content_" .. vName
 					contentFrame.Size = UDim2.new(1, 0, 0, 0)
 					contentFrame.AutomaticSize = Enum.AutomaticSize.Y
 					contentFrame.BackgroundTransparency = 1
+					contentFrame.GroupTransparency = (i == 1) and 0 or 1
 					contentFrame.Visible = (i == 1)
 					contentFrame.LayoutOrder = 2
 					contentFrame.Parent = blockContainer
-					contentFrame:SetAttribute("AxiomVariantIndex", i)
 					contentContainers[i] = contentFrame
 
 					local cLayout = Instance.new("UIListLayout")
@@ -9926,11 +6590,12 @@ function Library.CreateWindow(arg1, arg2)
 					tabBtn.MouseButton1Click:Connect(function()
 						if activeIndex == i then return end
 						
-						local oldTab = tabs[activeIndex]
-						if oldTab then
-							if oldTab.Stroke then
-								TS:Create(oldTab.Stroke, TweenInfo.new(0.25), {Transparency = 1}):Play()
-							end
+						local oldIdx = activeIndex
+						local oldTab = tabs[oldIdx]
+						local oldContent = contentContainers[oldIdx]
+						
+						if oldTab and oldTab.Stroke then
+							TS:Create(oldTab.Stroke, TweenInfo.new(0.22, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Transparency = 1}):Play()
 							for _, child in ipairs(oldTab.Btn:GetChildren()) do
 								if child:IsA("ImageLabel") then ApplyTheme(child, "TextMuted", "ImageColor3") end
 								if child:IsA("TextLabel") then 
@@ -9939,15 +6604,13 @@ function Library.CreateWindow(arg1, arg2)
 								end
 							end
 						end
-						local previousContent = contentContainers[activeIndex]
-						previousContent.Visible = false
-						previousContent.GroupTransparency = 1
+						
 						activeIndex = i
 						local newTab = tabs[i]
-						if newTab then
-							if newTab.Stroke then
-								TS:Create(newTab.Stroke, TweenInfo.new(0.25), {Transparency = 0}):Play()
-							end
+						local newContent = contentContainers[i]
+						
+						if newTab and newTab.Stroke then
+							TS:Create(newTab.Stroke, TweenInfo.new(0.22, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Transparency = 0}):Play()
 							for _, child in ipairs(newTab.Btn:GetChildren()) do
 								if child:IsA("ImageLabel") then ApplyTheme(child, "Text", "ImageColor3") end
 								if child:IsA("TextLabel") then 
@@ -9956,14 +6619,25 @@ function Library.CreateWindow(arg1, arg2)
 								end
 							end
 						end
-						local nextContent = contentContainers[activeIndex]
-						nextContent.GroupTransparency = motionConfig and 1 or 0
-						nextContent.Visible = true
-						if motionConfig then
-							local original = nextContent.Position
-							nextContent.Position = original + UDim2.fromOffset(0, 8)
-							TS:Create(nextContent, TweenInfo.new(motionDuration, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {Position = original, GroupTransparency = 0}):Play()
-						end
+
+						local fadeOut = TS:Create(oldContent, TweenInfo.new(0.18, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
+							GroupTransparency = 1,
+							Position = UDim2.new(0, 0, 0, -4)
+						})
+						fadeOut:Play()
+						fadeOut.Completed:Once(function()
+							if activeIndex ~= oldIdx then
+								oldContent.Visible = false
+							end
+						end)
+
+						newContent.Position = UDim2.new(0, 0, 0, 4)
+						newContent.GroupTransparency = 1
+						newContent.Visible = true
+						TS:Create(newContent, TweenInfo.new(0.22, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
+							GroupTransparency = 0,
+							Position = UDim2.new(0, 0, 0, 0)
+						}):Play()
 					end)
 
 					local bObj = BuildElementAPI(contentFrame, vName, vIcon, bSide, name, tabData.IsSettings)
@@ -10804,7 +7478,7 @@ function Library.CreateWindow(arg1, arg2)
 		Side = "Left"
 	})
 	
-	editModeToggleAPI = MainSettingsBlock:CreateToggle({
+	MainSettingsBlock:CreateToggle({
 		Name = "GUI Edit",
 		Default = false,
 		Callback = function(state)
@@ -10813,39 +7487,6 @@ function Library.CreateWindow(arg1, arg2)
 	})
 	
 	MainSettingsBlock:CreateLabel("Enable GUI Edit to visually customize the menu without game interference. The mouse will be forced to stay unlocked.")
-	local visualBlock = Window.SettingsTab:CreateBlock({Name = "Visual Effects", Side = "Right"})
-	visualBlock:CreateDropdown({
-		Name = "Animated Background",
-		Options = {"None", "Constellation", "DotMatrix", "PulseGrid", "Aurora", "Comets"},
-		Default = backgroundMode,
-		Callback = function(mode) Window:SetAnimatedBackground(mode) end
-	})
-	visualBlock:CreateSlider({
-		Name = "Background Intensity", Min = 0, Max = 1, Step = 0.05,
-		Default = backgroundIntensity,
-		Callback = function(value) Window:SetAnimatedBackground(backgroundMode, value) end
-	})
-	visualBlock:CreateToggle({
-		Name = "Glass Mode", Default = glassConfig,
-		Callback = function(value) Window:SetGlassMode(value) end
-	})
-	visualBlock:CreateSlider({
-		Name = "Glass Strength", Min = 0, Max = 1, Step = 0.05,
-		Default = glassStrength,
-		Callback = function(value) Window:SetGlassMode(glassConfig, value) end
-	})
-	visualBlock:CreateDropdown({
-		Name = "Glass Quality", Options = {"Low", "Balanced", "High"}, Default = glassResolution <= 90 and "Low" or glassResolution >= 192 and "High" or "Balanced",
-		Callback = function(level) Window:SetGlassQuality(level) end
-	})
-	visualBlock:CreateToggle({
-		Name = "Smooth Motion", Default = motionConfig,
-		Callback = function(value) Window:SetMotion(value) end
-	})
-	visualBlock:CreateSlider({
-		Name = "Motion Duration", Min = 0.1, Max = 0.6, Step = 0.05, Default = motionDuration,
-		Callback = function(value) Window:SetMotion(motionConfig, value) end
-	})
 
 	local ThemeSaveBlock = Window.SettingsTab:CreateBlock({
 		Name = "Theme Management",
@@ -11160,7 +7801,6 @@ function Library.CreateWindow(arg1, arg2)
 		Default = math.round(THEME.InputTrans * 100),
 		Callback = function(v) UpdateTheme("InputTrans", v/100) end
 	})
-
 	transBlock:CreateSlider({
 		Name = "HUD",
 		Min = 0,
@@ -11203,6 +7843,15 @@ function Library.CreateWindow(arg1, arg2)
 		Name = "Open GUI Keybind",
 		Default = openKeybind,
 		Callback = function(key) Window:SetOpenKeybind(key) end
+	})
+	layoutBlock:CreateDropdown({
+		Name = "Background Effect",
+		Options = {"None", "Constellation", "Matrix Dots", "Floating Sparks"},
+		Default = THEME.BackgroundEffect or "Constellation",
+		Callback = function(opt)
+			THEME.BackgroundEffect = opt
+			initBackgroundFX(opt)
+		end
 	})
 	layoutBlock:CreateToggle({
 		Name = "Main GUI Outline",
@@ -11427,7 +8076,15 @@ function Library.CreateWindow(arg1, arg2)
 			local success, res = pcall(function() return HttpService:JSONDecode(raw) end)
 			if success and type(res) == "table" then
 				for id, val in pairs(res) do
-					if Window._configElements[id] then
+					if id == "__DetachedBlocks__" and type(val) == "table" then
+						for bKey, bInfo in pairs(Window._blockRegistry) do
+							if val[bKey] then
+								bInfo.SetDetached(true, val[bKey])
+							else
+								bInfo.SetDetached(false)
+							end
+						end
+					elseif Window._configElements[id] then
 						pcall(function() Window._configElements[id].API:Load(val) end)
 					end
 				end
@@ -11465,6 +8122,14 @@ function Library.CreateWindow(arg1, arg2)
 					data[id] = savedData
 				end
 			end
+
+			local detachedBlocksData = {}
+			for bKey, bInfo in pairs(Window._blockRegistry) do
+				if bInfo.IsDetached() then
+					detachedBlocksData[bKey] = bInfo.GetPosition()
+				end
+			end
+			data["__DetachedBlocks__"] = detachedBlocksData
 			
 			local sEncode, json = pcall(function() return HttpService:JSONEncode(data) end)
 			if not sEncode then
@@ -11568,6 +8233,7 @@ function Library.CreateWindow(arg1, arg2)
 		BackgroundImage = {"Fonts & Extras~Bg Image ID", "Text"},
 		TextFont = {"Fonts & Extras~Primary Font", "Dropdown"},
 		SubtextFont = {"Fonts & Extras~Subtext Font", "Dropdown"},
+		BackgroundEffect = {"Layout & Styles~Background Effect", "Dropdown"},
 		MainOutlineEnabled = {"Layout & Styles~Main GUI Outline", "Toggle"},
 		InternalOutlines = {"Layout & Styles~Internal Outlines", "Dropdown"},
 		ElementStyle = {"Layout & Styles~GUI Style", "Style"},
@@ -11643,7 +8309,6 @@ function Library.CreateWindow(arg1, arg2)
 
 	searchContainer.Visible = showSearchBar
 	profileBlock.Visible = showProfile
-	setGlass(glassConfig)
 	UpdateElementCorners(elCornerRadiusNum)
 
 	UpdateTopbarAlign(THEME.TopbarAlign)
@@ -11710,7 +8375,15 @@ function Library.CreateWindow(arg1, arg2)
 				local s2, res = pcall(function() return HttpService:JSONDecode(rawJson) end)
 				if s2 and type(res) == "table" then
 					for id, val in pairs(res) do
-						if Window._configElements[id] then
+						if id == "__DetachedBlocks__" and type(val) == "table" then
+							for bKey, bInfo in pairs(Window._blockRegistry) do
+								if val[bKey] then
+									bInfo.SetDetached(true, val[bKey])
+								else
+									bInfo.SetDetached(false)
+								end
+							end
+						elseif Window._configElements[id] then
 							pcall(function() Window._configElements[id].API:Load(val) end)
 						end
 					end
